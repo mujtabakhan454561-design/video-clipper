@@ -25,18 +25,27 @@ with st.form("clip_form"):
     api_key = st.text_input("Gemini API key (AI highlights ke liye — free)",
                             type="password", placeholder="AIza...",
                             help="Free key: aistudio.google.com/apikey — nahi doge to auto mode chalega.")
+    pexels_key = st.text_input("Pexels API key (AI B-roll visuals ke liye — free)",
+                               type="password", placeholder="...",
+                               help="Free key: pexels.com/api — nahi doge to B-roll off rahega.")
     moment = st.text_input("Find specific moment (optional)",
                            placeholder="e.g. When Sam talks about GPT-5.")
     c1, c2, c3 = st.columns(3)
     n_clips = c1.number_input("Kitne clips", 1, 8, 3)
     min_dur = c2.number_input("Min seconds", 10, 120, 20)
     max_dur = c3.number_input("Max seconds", 15, 180, 60)
-    style = st.selectbox("Clip style", ["default", "modern"],
-                         format_func=lambda s: "Default (white)" if s == "default" else "Modern (yellow)")
+    style = st.selectbox("Clip style",
+                         ["default", "modern", "neon", "beast", "gold", "minimal"],
+                         format_func=lambda s: {
+                             "default": "Default (white)", "modern": "Modern (yellow)",
+                             "neon": "Neon (cyan)", "beast": "Beast (red)",
+                             "gold": "Gold", "minimal": "Minimal (small)"}[s])
     t1, t2, t3 = st.columns(3)
     remove_silence = t1.checkbox("Remove silences")
     hl_keywords = t2.checkbox("Highlight keywords", value=True)
     auto_emoji = t3.checkbox("Auto emoji", value=True)
+    broll = st.checkbox("🎞 AI B-roll (video se related photos/videos)", value=True,
+                        help="Pexels key chahiye — har clip me related visuals auto lag jayenge.")
     go = st.form_submit_button("✂️ Clips Banao", use_container_width=True)
 
 if go:
@@ -60,7 +69,8 @@ if go:
                     n_clips=int(n_clips), min_dur=int(min_dur),
                     max_dur=int(max_dur), moment=moment.strip(),
                     remove_silence=remove_silence, style=style,
-                    hl_keywords=hl_keywords, auto_emoji=auto_emoji),
+                    hl_keywords=hl_keywords, auto_emoji=auto_emoji,
+                    pexels_key=pexels_key.strip(), broll=broll),
     )
     thread.start()
 

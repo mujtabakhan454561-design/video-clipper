@@ -1,13 +1,16 @@
 """Core pipeline: download -> transcript -> AI highlights -> vertical clips.
 Vizard-style features: moment search, silence removal, caption styles,
-keyword highlighting, auto emoji titles.
+keyword highlighting, auto emoji titles, AI B-roll (Pexels).
 """
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass, field
 
 # yt-dlp venv ke andar installed hai -> python -m yt_dlp use karo
@@ -292,8 +295,14 @@ def fallback_highlights(duration, n_clips, min_dur, max_dur):
 STYLES = {
     "default": ("Arial", 62, "&H00FFFFFF", 3, 150),   # white
     "modern": ("Arial", 72, "&H0000FFFF", 4, 170),     # yellow bold (screenshot jaisa)
+    "neon": ("Arial", 68, "&H00FFFF00", 3, 160),       # cyan neon
+    "beast": ("Arial", 84, "&H000000FF", 5, 170),       # red bold huge
+    "gold": ("Arial", 70, "&H0000D7FF", 4, 160),       # gold
+    "minimal": ("Arial", 44, "&H00FFFFFF", 2, 110),    # small white
 }
-HL_COLORS = {"default": "&H0000FFFF", "modern": "&H00FFFFFF"}
+HL_COLORS = {"default": "&H0000FFFF", "modern": "&H00FFFFFF",
+             "neon": "&H00FFFFFF", "beast": "&H0000FFFF",
+             "gold": "&H00FFFFFF", "minimal": "&H0000FFFF"}
 
 
 def _ass_esc(s: str) -> str:
@@ -428,6 +437,147 @@ def _burnable_title(t: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# ---------------- AI B-roll (Pexels: related photos/videos) ----------------
+
+_STOPWORDS = set(
+    "the a an and or of to in on is are was were be been for with as at by "
+    "from that this it its they them he she his her you your we our i my me "
+    "not no do does did will would can could should have has had all any very "
+    "just so but if about into out up down over under then than too what when "
+    "there here".split())
+
+
+def _broll_queries(seg_cues, keywords):
+    """Clip ke liye 2 Pexels search queries: AI keywords, warna frequent words."""
+    qs = [k.strip() for k in (keywords or []) if len(k.strip()) > 2][:2]
+    if len(qs) < 2:
+        freq = {}
+        for c in seg_cues:
+            for w in re.findall(r"[a-zA-Z]{4,}", c["text"].lower()):
+                if w not in _STOPWORDS:
+                    freq[w] = freq.get(w, 0) + 1
+        for w, _ in sorted(freq.items(), key=lambda x: -x[1]):
+            if w not in qs:
+                qs.append(w)
+            if len(qs) == 2:
+                break
+    return qs
+
+
+def _download(url, dest):
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def _pexels_json(url, key):
+    req = urllib.request.Request(url, headers={"Authorization": key})
+    with urllib.request.urlopen(req, timeout=30) as r:
+        return json.load(r)
+
+
+def pexels_fetch(query, key, workdir, dur):
+    """Pexels se related video (warna photo->zoompan) lao: 1080x1920, dur sec.
+    Fail ho to None."""
+    q = urllib.parse.quote(query)
+    uid = uuid.uuid4().hex[:6]
+    # 1) stock video
+    try:
+        data = _pexels_json(
+            f"https://api.pexels.com/videos/search?query={q}&per_page=3"
+            "&orientation=portrait&size=small", key)
+        for v in data.get("videos", []):
+            files = sorted((f for f in v.get("video_files", []) if f.get("link")),
+                           key=lambda f: f.get("width", 9999))
+            if not files:
+                continue
+            src = os.path.join(workdir, f"broll_src_{uid}.mp4")
+            _download(files[0]["link"], src)
+            out = os.path.join(workdir, f"broll_{uid}.mp4")
+            run_cmd(["ffmpeg", "-y", "-i", src, "-vf",
+                     "scale=1080:1920:force_original_aspect_ratio=increase,"
+                     "crop=1080:1920,fps=30",
+                     "-t", str(dur), "-an", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "23", out])
+            return out
+    except Exception:
+        pass
+    # 2) photo fallback -> slow zoom video
+    try:
+        data = _pexels_json(
+            f"https://api.pexels.com/v1/search?query={q}&per_page=3"
+            "&orientation=portrait", key)
+        for p in data.get("photos", []):
+            srcinfo = p.get("src") or {}
+            link = srcinfo.get("large") or srcinfo.get("medium")
+            if not link:
+                continue
+            src = os.path.join(workdir, f"broll_img_{uid}.jpg")
+            _download(link, src)
+            out = os.path.join(workdir, f"broll_{uid}.mp4")
+            run_cmd(["ffmpeg", "-y", "-loop", "1", "-i", src, "-vf",
+                     "scale=1080:1920:force_original_aspect_ratio=increase,"
+                     "crop=1080:1920,zoompan=z='min(zoom+0.0012,1.25)':d=1:"
+                     "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                     "s=1080x1920:fps=30",
+                     "-t", str(dur), "-an", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "23", out])
+            return out
+    except Exception:
+        pass
+    return None
+
+
+def _plan_broll_slots(dur):
+    """(start, dur) slots: 20s+ par 1, 35s+ par 2."""
+    slots = []
+    if dur >= 20:
+        slots.append((dur * 0.40, 3.5))
+    if dur >= 35:
+        slots.append((dur * 0.68, 3.5))
+    return [(s, d) for s, d in slots if s + d < dur - 1]
+
+
+def add_broll(clip_path, slots, out_path):
+    """slots=[(start, dur, broll_path)]: B-roll se main video cover karo,
+    audio/captions same rehte hain."""
+    r = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", clip_path],
+        capture_output=True, text=True)
+    D = float(r.stdout.strip())
+    slots = sorted(slots)
+    n = len(slots)
+    bounds = [0.0]
+    for (st, du, _) in slots:
+        bounds += [st, st + du]
+    bounds.append(D)
+    fc = ["[0:v]split=%d%s" % (n + 1, "".join(f"[m{i}]" for i in range(n + 1)))]
+    for i in range(n + 1):
+        a, b = bounds[2 * i], bounds[2 * i + 1]
+        fc.append(f"[m{i}]trim={a:.3f}:{b:.3f},setpts=PTS-STARTPTS,"
+                  "scale=1080:1920:force_original_aspect_ratio=increase,"
+                  f"crop=1080:1920,fps=30[p{i}]")
+    for i in range(1, n + 1):
+        fc.append(f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
+                  f"crop=1080:1920,fps=30,setpts=PTS-STARTPTS[q{i}]")
+    seq = []
+    for i in range(n + 1):
+        seq.append(f"[p{i}]")
+        if i < n:
+            seq.append(f"[q{i + 1}]")
+    fc.append("".join(seq) + f"concat=n={2 * n + 1}:v=1:a=0[vout]")
+    cmd = ["ffmpeg", "-y", "-i", clip_path]
+    for (_, _, bp) in slots:
+        cmd += ["-i", bp]
+    cmd += ["-filter_complex", ";".join(fc),
+            "-map", "[vout]", "-map", "0:a",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "128k",
+            "-movflags", "+faststart", out_path]
+    run_cmd(cmd)
+
+
 def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
              kept=None, face_cx=None):
     ass_esc = ass_path.replace(":", "\\:").replace("'", "")
@@ -443,14 +593,7 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
         expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
         vf.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
         af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
-    if title:
-        t = _burnable_title((emoji + " " + title) if emoji else title)
-        if t:
-            t = t.replace(":", "\\:").replace("'", "").replace(",", "\\,")
-            vf.append(
-                "drawtext=font='DejaVu Sans':"
-                f"text='{t}':fontsize=52:fontcolor=white:borderw=2:bordercolor=black:"
-                "x=(w-text_w)/2:y=100")
+    # title overlay hata diya (user ki request) — title sirf app UI me dikhega
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", video,
            "-vf", ",".join(vf)]
     if af:
@@ -465,7 +608,7 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
 def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             n_clips=3, min_dur=20, max_dur=60, moment="",
             remove_silence=False, style="default", hl_keywords=True,
-            auto_emoji=True):
+            auto_emoji=True, pexels_key="", broll=True):
     try:
         job.status = "running"
         wd = job.workdir
@@ -546,6 +689,24 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             cut_clip(video, ass, s, e, out,
                      title=h["title"], emoji=emoji, kept=kept,
                      face_cx=face_cx)
+            # AI B-roll: related photos/videos se main video cover karo
+            if broll and pexels_key.strip():
+                try:
+                    dur = sum(b - a for a, b in kept) if kept else (e - s)
+                    slots = _plan_broll_slots(dur)
+                    queries = _broll_queries(seg, h.get("keywords"))
+                    bro = []
+                    for (bs, bd), q in zip(slots, queries):
+                        job.message = f"Clip {i+1}: B-roll '{q}' lag raha hai..."
+                        p = pexels_fetch(q, pexels_key.strip(), wd, bd)
+                        if p:
+                            bro.append((bs, bd, p))
+                    if bro:
+                        tmp = out + ".broll.mp4"
+                        add_broll(out, bro, tmp)
+                        os.replace(tmp, out)
+                except Exception:
+                    pass  # B-roll fail -> original clip rehne do
             job.clips.append({
                 "file": f"{job.job_id}/clips/clip{i+1}.mp4",
                 "title": h["title"], "reason": h.get("reason", ""),
