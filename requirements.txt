@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+python-multipart
+yt-dlp
+requests
+pillow
+opencv-python-headless
+# local file transcription ke liye (YouTube links ke liye zaroori nahi)
+faster-whisper
