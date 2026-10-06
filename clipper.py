@@ -175,22 +175,28 @@ def transcribe_upload(video_path: str):
 
 # ---------------- AI ----------------
 
+_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+
 def _gemini_json(prompt: str, api_key: str):
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"},
     }).encode()
-    req = urllib.request.Request(
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + api_key,
-        data=body, headers={"Content-Type": "application/json"}, method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=120) as resp:
-            data = json.load(resp)
-        raw = data["candidates"][0]["content"]["parts"][0]["text"]
-        return json.loads(raw)
-    except Exception as e:
-        raise RuntimeError(f"AI request failed (API key check karo): {e}")
+    last_err = "koi model nahi mila"
+    for model in _GEMINI_MODELS:
+        req = urllib.request.Request(
+            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=" + api_key,
+            data=body, headers={"Content-Type": "application/json"}, method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                data = json.load(resp)
+            raw = data["candidates"][0]["content"]["parts"][0]["text"]
+            return json.loads(raw)
+        except Exception as e:
+            last_err = str(e)
+            continue  # agla model try karo (purana retire ho sakta hai)
+    raise RuntimeError(f"AI request failed (API key check karo): {last_err}")
 
 
 def _clean_items(items, n_clips, min_dur, max_dur):
@@ -493,13 +499,18 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
 
         job.message = "AI best moments dhoond raha hai..."
         job.progress = 50
-        if moment.strip():
-            highlights = find_moments(cues, moment.strip(), api_key,
-                                      n_clips, min_dur, max_dur)
-        elif api_key.strip():
-            highlights = ai_highlights(cues, api_key.strip(),
-                                       n_clips, min_dur, max_dur)
-        else:
+        try:
+            if moment.strip():
+                highlights = find_moments(cues, moment.strip(), api_key,
+                                          n_clips, min_dur, max_dur)
+            elif api_key.strip():
+                highlights = ai_highlights(cues, api_key.strip(),
+                                           n_clips, min_dur, max_dur)
+            else:
+                highlights = fallback_highlights(duration, n_clips, min_dur, max_dur)
+        except RuntimeError as e:
+            # AI key/model fail -> auto mode se clips banao, rukna nahi
+            job.message = f"AI nahi chala ({e}), auto mode..."
             highlights = fallback_highlights(duration, n_clips, min_dur, max_dur)
 
         outdir = os.path.join(wd, "clips")
