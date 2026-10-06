@@ -48,9 +48,9 @@ def run_cmd(cmd, cwd=None):
     return r.stdout
 
 
-def _run_ytdlp(args):
+def _run_ytdlp(args, extra=None):
     """yt-dlp chalao; proxy SSL issue ho to --no-check-certificate se retry."""
-    base = ["--extractor-args", "youtube:player_client=android"]
+    base = list(extra or [])
     r = subprocess.run(YTDLP + base + args, capture_output=True, text=True)
     if r.returncode != 0 and "CERTIFICATE_VERIFY_FAILED" in r.stderr:
         r = subprocess.run(YTDLP + base + ["--no-check-certificate"] + args,
@@ -58,28 +58,53 @@ def _run_ytdlp(args):
     return r
 
 
+def _downloaded_file(workdir):
+    for f in os.listdir(workdir):
+        if f.startswith("source.") and os.path.getsize(os.path.join(workdir, f)) > 100_000:
+            return os.path.join(workdir, f)
+    return None
+
+
 # ---------------- download ----------------
 
+# mukhtalif YouTube clients try karo (koi ek chal jata hai)
+_CLIENT_OPTS = [
+    [],
+    ["--extractor-args", "youtube:player_client=web"],
+    ["--extractor-args", "youtube:player_client=android"],
+]
+
+
 def download_video(url: str, workdir: str) -> tuple[str, float, str]:
-    out = os.path.join(workdir, "source.%(ext)s")
-    r = _run_ytdlp([
-        "--no-playlist", "-f",
-        "bv*[ext=mp4]+ba*[ext=m4a]/b[ext=mp4]/b",
-        "--merge-output-format", "mp4",
-        "-o", out, "--print", "%(duration)s\t%(title)s", url,
-    ])
-    if r.returncode != 0:
-        raise RuntimeError("Video download failed. Link sahi hai? " + r.stderr[-500:])
-    line = (r.stdout.strip().splitlines() or ["0\tvideo"])[-1]
-    dur_s, title = (line.split("\t") + ["video"])[:2]
-    try:
-        duration = float(dur_s)
-    except ValueError:
-        duration = 0
-    for f in os.listdir(workdir):
-        if f.startswith("source."):
-            return os.path.join(workdir, f), duration, title.strip()
-    raise RuntimeError("Downloaded file nahi mili.")
+    last_err = ""
+    for opts in _CLIENT_OPTS:
+        for f in os.listdir(workdir):
+            if f.startswith("source."):
+                os.remove(os.path.join(workdir, f))
+        out = os.path.join(workdir, "source.%(ext)s")
+        r = _run_ytdlp([
+            "--no-playlist", "-f",
+            "bv*[ext=mp4]+ba*[ext=m4a]/b[ext=mp4]/b",
+            "--merge-output-format", "mp4",
+            "-o", out, "--print", "%(duration)s\t%(title)s", url,
+        ], extra=opts)
+        if r.returncode != 0:
+            last_err = r.stderr[-300:]
+            continue
+        line = (r.stdout.strip().splitlines() or ["0\tvideo"])[-1]
+        dur_s, title = (line.split("\t") + ["video"])[:2]
+        try:
+            duration = float(dur_s)
+        except ValueError:
+            duration = 0
+        path = _downloaded_file(workdir)
+        if path:
+            return path, duration, title.strip()
+        last_err = "file download nahi hui"
+    raise RuntimeError(
+        "YouTube ne is server se download block kar diya. "
+        "Video apne phone me download karke 'file upload' wala option use karo. "
+        + last_err[-150:])
 
 
 # ---------------- transcript ----------------
