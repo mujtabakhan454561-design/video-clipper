@@ -5,5 +5,6 @@ yt-dlp
 requests
 pillow
 opencv-python-headless
+streamlit
 # local file transcription ke liye (YouTube links ke liye zaroori nahi)
 faster-whisper
