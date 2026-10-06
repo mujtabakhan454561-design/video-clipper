@@ -148,6 +148,16 @@ def fetch_transcript(url: str, workdir: str):
 def transcribe_upload(video_path: str):
     """Local file -> faster-whisper (language auto-detect)."""
     try:
+        # PyAV 15+ me 'metadata_errors' option khatam ho gaya;
+        # faster-whisper abhi bhi wohi purana call karta hai -> shim laga do
+        import av
+        _orig_open = av.open
+
+        def _safe_open(*a, **k):
+            k.pop("metadata_errors", None)
+            return _orig_open(*a, **k)
+
+        av.open = _safe_open
         from faster_whisper import WhisperModel
     except ImportError:
         raise RuntimeError(
