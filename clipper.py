@@ -75,6 +75,9 @@ _CLIENT_OPTS = [
     [],
     ["--extractor-args", "youtube:player_client=web"],
     ["--extractor-args", "youtube:player_client=android"],
+    ["--extractor-args", "youtube:player_client=ios"],
+    ["--extractor-args", "youtube:player_client=web_embedded"],
+    ["--extractor-args", "youtube:player_client=tv"],
 ]
 
 
@@ -104,10 +107,58 @@ def download_video(url: str, workdir: str) -> tuple[str, float, str]:
         if path:
             return path, duration, title.strip()
         last_err = "file download nahi hui"
+    # yt-dlp fail -> Invidious instances se try karo (YouTube ka alternate rasta)
+    if "youtu" in url or "youtube.com" in url or "y2u.be" in url:
+        inv = _invidious_download(url, workdir)
+        if inv:
+            return inv
     raise RuntimeError(
         "YouTube ne is server se download block kar diya. "
         "Video apne phone me download karke 'file upload' wala option use karo. "
         + last_err[-150:])
+
+
+_INVIDIOUS = [
+    "https://inv.tux.pizza",
+    "https://invidious.nerdvpn.de",
+    "https://iv.melmac.space",
+    "https://inv.us.projectsegfau.lt",
+    "https://vid.puffyan.us",
+]
+
+
+def _invidious_download(url, workdir):
+    """Invidious public API se YouTube video lao (koi key nahi chahiye)."""
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|live/)([\w-]{11})", url)
+    if not m:
+        return None
+    vid = m.group(1)
+    for inst in _INVIDIOUS:
+        try:
+            req = urllib.request.Request(
+                f"{inst}/api/v1/videos/{vid}",
+                headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                data = json.load(r)
+            streams = data.get("formatStreams") or []
+
+            def _score(s):
+                q = re.sub(r"\D", "", s.get("qualityLabel") or "") or "0"
+                ok = "mp4" in (s.get("container") or "")
+                return int(q) if ok else -1
+
+            streams.sort(key=_score, reverse=True)
+            if not streams or _score(streams[0]) < 0:
+                continue
+            dur = float(data.get("lengthSeconds") or 0)
+            title = data.get("title") or "video"
+            _download(streams[0]["url"], os.path.join(workdir, "source.mp4"))
+            path = _downloaded_file(workdir)
+            if path:
+                return path, dur, title
+        except Exception:
+            continue
+    return None
 
 
 # ---------------- transcript ----------------
@@ -274,6 +325,28 @@ Reply ONLY with a JSON array: {{"start": <seconds>, "end": <seconds>, "title": "
     return out
 
 
+def ai_hooks(highlights, clip_segs, api_key):
+    """Har clip ke liye AI se catchy hook line banao (3-7 lafz)."""
+    if not api_key.strip():
+        return [h["title"] for h in highlights]
+    blocks = []
+    for i, (h, seg) in enumerate(zip(highlights, clip_segs)):
+        txt = " ".join(c["text"] for c in seg)[:600]
+        blocks.append(f"Clip {i+1} [{h['title']}]: {txt}")
+    prompt = (
+        "You write viral TikTok hooks. For each clip below write ONE short "
+        "punchy hook line (3-7 words, no emoji, no quotes) that stops scrolling.\n\n"
+        + "\n".join(blocks) +
+        "\n\nReply ONLY with a JSON array of strings, one per clip, same order.")
+    try:
+        hooks = _gemini_json(prompt, api_key.strip())
+        if isinstance(hooks, list) and len(hooks) == len(highlights):
+            return [str(x).strip()[:60] for x in hooks]
+    except Exception:
+        pass
+    return [h["title"] for h in highlights]
+
+
 def fallback_highlights(duration, n_clips, min_dur, max_dur):
     if duration <= 0:
         duration = n_clips * 60
@@ -291,27 +364,50 @@ def fallback_highlights(duration, n_clips, min_dur, max_dur):
 
 # ---------------- subtitles (ASS, Vizard styles) ----------------
 
-# name: (font, size, primary BGR color, outline, marginV)
+RATIOS = {"9:16": (1080, 1920), "4:5": (1080, 1350),
+          "1:1": (1080, 1080), "16:9": (1280, 720)}
+
+CAPTION_COLORS = {
+    "White": "&H00FFFFFF", "Yellow": "&H0000FFFF", "Cyan": "&H00FFFF00",
+    "Lime": "&H0000FF00", "Red": "&H000000FF", "Orange": "&H000080FF",
+    "Pink": "&H00FF80FF",
+}
+
+# name: (font, size, primary BGR color, outline, marginV, borderStyle, shadow, backColor)
 STYLES = {
-    "default": ("Arial", 62, "&H00FFFFFF", 3, 150),   # white
-    "modern": ("Arial", 72, "&H0000FFFF", 4, 170),     # yellow bold (screenshot jaisa)
-    "neon": ("Arial", 68, "&H00FFFF00", 3, 160),       # cyan neon
-    "beast": ("Arial", 84, "&H000000FF", 5, 170),       # red bold huge
-    "gold": ("Arial", 70, "&H0000D7FF", 4, 160),       # gold
-    "minimal": ("Arial", 44, "&H00FFFFFF", 2, 110),    # small white
+    "default": ("Arial", 62, "&H00FFFFFF", 3, 150, 1, 0, "&H99000000"),  # white
+    "modern":  ("Arial", 72, "&H0000FFFF", 4, 170, 1, 0, "&H99000000"),  # yellow bold
+    "neon":    ("Arial", 68, "&H00FFFF00", 3, 160, 1, 0, "&H99000000"),  # cyan neon
+    "beast":   ("Arial", 84, "&H000000FF", 5, 170, 1, 0, "&H99000000"),  # red bold huge
+    "gold":    ("Arial", 70, "&H0000D7FF", 4, 160, 1, 0, "&H99000000"),  # gold
+    "minimal": ("Arial", 44, "&H00FFFFFF", 2, 110, 1, 0, "&H99000000"),  # small white
+    "hormozi": ("Arial", 88, "&H00FFFFFF", 6, 180, 1, 0, "&H99000000"),  # hormozi bold
+    "boxed":   ("Arial", 64, "&H00FFFFFF", 2, 150, 3, 0, "&HCC000000"),  # black box
+    "invert":  ("Arial", 68, "&H00000000", 4, 160, 1, 0, "&H99FFFFFF"),  # black text
+    "soft":    ("Arial", 60, "&H00FFFFFF", 1, 150, 1, 3, "&H99000000"),  # soft shadow
 }
 HL_COLORS = {"default": "&H0000FFFF", "modern": "&H00FFFFFF",
              "neon": "&H00FFFFFF", "beast": "&H0000FFFF",
-             "gold": "&H00FFFFFF", "minimal": "&H0000FFFF"}
+             "gold": "&H00FFFFFF", "minimal": "&H0000FFFF",
+             "hormozi": "&H0000FFFF", "boxed": "&H0000FFFF",
+             "invert": "&H0000FFFF", "soft": "&H00FFFF00"}
 
 
 def _ass_esc(s: str) -> str:
     return s.replace("{", "(").replace("}", ")").replace("\n", " ")
 
 
-def write_ass(cues, path, style="default", keywords=None, hl_on=False):
-    font, size, color, outline, margin_v = STYLES.get(style, STYLES["default"])
+def write_ass(cues, path, style="default", keywords=None, hl_on=False,
+              color_override=None, ratio="9:16"):
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
+    font, size, color, outline, margin_v, bs, sh, back = STYLES.get(
+        style, STYLES["default"])
+    base = color_override or color
+    # keyword highlight: base se contrast rakho
     hl_color = HL_COLORS.get(style, HL_COLORS["default"])
+    if color_override:
+        hl_color = "&H00FFFFFF" if base == "&H0000FFFF" else "&H0000FFFF"
+    margin_v = int(margin_v * H / 1920)
     kws = [k for k in (keywords or []) if len(k) > 2]
 
     def colorize(text):
@@ -320,19 +416,20 @@ def write_ass(cues, path, style="default", keywords=None, hl_on=False):
             for k in kws:
                 t = re.sub(
                     f"(?i)({re.escape(_ass_esc(k))})",
-                    r"{\\c" + hl_color + r"\\b1}\1{\\c" + color + r"\\b0}",
+                    r"{\\c" + hl_color + r"\\b1}\1{\\c" + base + r"\\b0}",
                     t)
         return t
 
     with open(path, "w", encoding="utf-8") as f:
-        f.write("[Script Info]\nScriptType: v4.00+\nPlayResX: 1080\nPlayResY: 1920\n"
+        f.write("[Script Info]\nScriptType: v4.00+\n"
+                f"PlayResX: {W}\nPlayResY: {H}\n"
                 "ScaledBorderAndShadow: yes\n\n[V4+ Styles]\n"
                 "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
                 "OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, "
                 "ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, "
                 "MarginL, MarginR, MarginV, Encoding\n"
-                f"Style: Clip,{font},{size},{color},&H000019FF,&H99000000,&H00000000,"
-                f"-1,0,0,0,100,100,0,0,1,{outline},0,2,40,40,{margin_v},1\n\n[Events]\n"
+                f"Style: Clip,{font},{size},{base},&H000019FF,{back},&H00000000,"
+                f"-1,0,0,0,100,100,0,0,{bs},{outline},{sh},2,40,40,{margin_v},1\n\n[Events]\n"
                 "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text\n")
         for c in cues:
             if c["end"] - c["start"] < 0.15:
@@ -476,16 +573,18 @@ def _pexels_json(url, key):
         return json.load(r)
 
 
-def pexels_fetch(query, key, workdir, dur):
+def pexels_fetch(query, key, workdir, dur, ratio="9:16"):
     """Pexels se related video (warna photo->zoompan) lao: 1080x1920, dur sec.
     Fail ho to None."""
     q = urllib.parse.quote(query)
     uid = uuid.uuid4().hex[:6]
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
+    orient = "portrait" if W <= H else "landscape"
     # 1) stock video
     try:
         data = _pexels_json(
             f"https://api.pexels.com/videos/search?query={q}&per_page=3"
-            "&orientation=portrait&size=small", key)
+            "&orientation=" + orient + "&size=small", key)
         for v in data.get("videos", []):
             files = sorted((f for f in v.get("video_files", []) if f.get("link")),
                            key=lambda f: f.get("width", 9999))
@@ -495,8 +594,8 @@ def pexels_fetch(query, key, workdir, dur):
             _download(files[0]["link"], src)
             out = os.path.join(workdir, f"broll_{uid}.mp4")
             run_cmd(["ffmpeg", "-y", "-i", src, "-vf",
-                     "scale=1080:1920:force_original_aspect_ratio=increase,"
-                     "crop=1080:1920,fps=30",
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                     f"crop={W}:{H},fps=30",
                      "-t", str(dur), "-an", "-c:v", "libx264",
                      "-preset", "veryfast", "-crf", "23", out])
             return out
@@ -506,7 +605,7 @@ def pexels_fetch(query, key, workdir, dur):
     try:
         data = _pexels_json(
             f"https://api.pexels.com/v1/search?query={q}&per_page=3"
-            "&orientation=portrait", key)
+            f"&orientation={orient}", key)
         for p in data.get("photos", []):
             srcinfo = p.get("src") or {}
             link = srcinfo.get("large") or srcinfo.get("medium")
@@ -516,10 +615,10 @@ def pexels_fetch(query, key, workdir, dur):
             _download(link, src)
             out = os.path.join(workdir, f"broll_{uid}.mp4")
             run_cmd(["ffmpeg", "-y", "-loop", "1", "-i", src, "-vf",
-                     "scale=1080:1920:force_original_aspect_ratio=increase,"
-                     "crop=1080:1920,zoompan=z='min(zoom+0.0012,1.25)':d=1:"
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                     f"crop={W}:{H},zoompan=z='min(zoom+0.0012,1.25)':d=1:"
                      "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
-                     "s=1080x1920:fps=30",
+                     f"s={W}x{H}:fps=30",
                      "-t", str(dur), "-an", "-c:v", "libx264",
                      "-preset", "veryfast", "-crf", "23", out])
             return out
@@ -528,7 +627,74 @@ def pexels_fetch(query, key, workdir, dur):
     return None
 
 
+def pixabay_fetch(query, key, workdir, dur, ratio="9:16"):
+    """Pixabay (free key foran milta hai) se related video/photo lao."""
+    q = urllib.parse.quote(query)
+    uid = uuid.uuid4().hex[:6]
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
+    orient = "vertical" if W <= H else "horizontal"
+    # 1) stock video
+    try:
+        req = urllib.request.Request(
+            f"https://pixabay.com/api/videos/?key={key}&q={q}&per_page=3"
+            f"&orientation={orient}"
+        )
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+        for h in data.get("hits", []):
+            vids = (h.get("videos") or {})
+            link = (vids.get("medium") or {}).get("url") or \
+                   (vids.get("small") or {}).get("url")
+            if not link:
+                continue
+            src = os.path.join(workdir, f"broll_src_{uid}.mp4")
+            _download(link, src)
+            out = os.path.join(workdir, f"broll_{uid}.mp4")
+            run_cmd(["ffmpeg", "-y", "-i", src, "-vf",
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                     f"crop={W}:{H},fps=30",
+                     "-t", str(dur), "-an", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "23", out])
+            return out
+    except Exception:
+        pass
+    # 2) photo fallback -> slow zoom video
+    try:
+        req = urllib.request.Request(
+            f"https://pixabay.com/api/?key={key}&q={q}&per_page=3"
+            f"&orientation={orient}&image_type=photo")
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+        for h in data.get("hits", []):
+            link = h.get("largeImageURL") or h.get("webformatURL")
+            if not link:
+                continue
+            src = os.path.join(workdir, f"broll_img_{uid}.jpg")
+            _download(link, src)
+            out = os.path.join(workdir, f"broll_{uid}.mp4")
+            run_cmd(["ffmpeg", "-y", "-loop", "1", "-i", src, "-vf",
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                     f"crop={W}:{H},zoompan=z='min(zoom+0.0012,1.25)':d=1:"
+                     "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                     f"s={W}x{H}:fps=30",
+                     "-t", str(dur), "-an", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "23", out])
+            return out
+    except Exception:
+        pass
+    return None
+
+
+def stock_fetch(query, key, workdir, dur, ratio="9:16"):
+    """Pexels (warna Pixabay) se B-roll lao — jo key chale."""
+    out = pexels_fetch(query, key, workdir, dur, ratio)
+    if out:
+        return out
+    return pixabay_fetch(query, key, workdir, dur, ratio)
+
+
 def _plan_broll_slots(dur):
+    """(start, dur) slots: 20s+ par 1, 35s+ par 2."""
     """(start, dur) slots: 20s+ par 1, 35s+ par 2."""
     slots = []
     if dur >= 20:
@@ -538,9 +704,10 @@ def _plan_broll_slots(dur):
     return [(s, d) for s, d in slots if s + d < dur - 1]
 
 
-def add_broll(clip_path, slots, out_path):
+def add_broll(clip_path, slots, out_path, ratio="9:16"):
     """slots=[(start, dur, broll_path)]: B-roll se main video cover karo,
     audio/captions same rehte hain."""
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
     r = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration",
          "-of", "default=noprint_wrappers=1:nokey=1", clip_path],
@@ -556,11 +723,11 @@ def add_broll(clip_path, slots, out_path):
     for i in range(n + 1):
         a, b = bounds[2 * i], bounds[2 * i + 1]
         fc.append(f"[m{i}]trim={a:.3f}:{b:.3f},setpts=PTS-STARTPTS,"
-                  "scale=1080:1920:force_original_aspect_ratio=increase,"
-                  f"crop=1080:1920,fps=30[p{i}]")
+                  f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                  f"crop={W}:{H},fps=30[p{i}]")
     for i in range(1, n + 1):
-        fc.append(f"[{i}:v]scale=1080:1920:force_original_aspect_ratio=increase,"
-                  f"crop=1080:1920,fps=30,setpts=PTS-STARTPTS[q{i}]")
+        fc.append(f"[{i}:v]scale={W}:{H}:force_original_aspect_ratio=increase,"
+                  f"crop={W}:{H},fps=30,setpts=PTS-STARTPTS[q{i}]")
     seq = []
     for i in range(n + 1):
         seq.append(f"[p{i}]")
@@ -579,15 +746,25 @@ def add_broll(clip_path, slots, out_path):
 
 
 def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
-             kept=None, face_cx=None):
+             kept=None, face_cx=None, ratio="9:16", captions=True, hook=""):
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
     ass_esc = ass_path.replace(":", "\\:").replace("'", "")
-    # smart crop: chehre par focus, warna center
-    if face_cx is None:
-        crop_x = "(in_w-ih*9/16)/2"
+    # scale-to-cover phir smart crop: chehre par focus (vertical), warna center
+    vf = [f"scale={W}:{H}:force_original_aspect_ratio=increase"]
+    if face_cx is not None and W <= H:
+        vf.append(f"crop={W}:{H}:x='clip(in_w*{face_cx:.3f}-{W/2},0,in_w-{W})'"
+                  f":y='(in_h-{H})/2'")
     else:
-        crop_x = f"clip(in_w*{face_cx:.3f}-ih*9/32,0,in_w-ih*9/16)"
-    vf = [f"crop=ih*9/16:ih:x={crop_x}", "scale=1080:1920",
-          f"subtitles='{ass_esc}'"]
+        vf.append(f"crop={W}:{H}")
+    if captions:
+        vf.append(f"subtitles='{ass_esc}'")
+    if hook:
+        t = _burnable_title(hook).replace(":", "\\:").replace("'", "").replace(",", "\\,")
+        if t:
+            vf.append(
+                "drawtext=font='DejaVu Sans':"
+                f"text='{t}':fontsize=54:fontcolor=white:borderw=3:bordercolor=black:"
+                "x=(w-text_w)/2:y=90")
     af = ["loudnorm=I=-16:TP=-1.5:LRA=11"]  # ek jaisi awaz har clip me
     if kept:
         expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
@@ -608,7 +785,8 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
 def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             n_clips=3, min_dur=20, max_dur=60, moment="",
             remove_silence=False, style="default", hl_keywords=True,
-            auto_emoji=True, pexels_key="", broll=True):
+            auto_emoji=True, pexels_key="", broll=True, ratio="9:16",
+            captions=True, caption_color="", show_hook=False, hook_text=""):
     try:
         job.status = "running"
         wd = job.workdir
@@ -622,6 +800,10 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             job.message = "Captions nikal rahe hain (language auto-detect)..."
             job.progress = 25
             cues = fetch_transcript(source_url, wd)
+            if not cues:
+                # captions blocked -> downloaded video ko Whisper se transcribe karo
+                job.message = "Captions blocked, AI transcribe kar raha hai..."
+                cues = transcribe_upload(video)
         else:
             video = upload_path
             job.title = os.path.basename(upload_path)
@@ -658,6 +840,16 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
 
         outdir = os.path.join(wd, "clips")
         os.makedirs(outdir, exist_ok=True)
+        # Hook: khud likha ho to wahi, warna AI se har clip ke liye banwao
+        if show_hook and not hook_text.strip():
+            job.message = "AI hooks likh raha hai..."
+            _segs = []
+            for h in highlights:
+                s0, e0 = h["start"], h["end"]
+                _segs.append([c for c in cues if c["end"] > s0 and c["start"] < e0])
+            auto_hooks = ai_hooks(highlights, _segs, api_key)
+        else:
+            auto_hooks = [hook_text] * len(highlights)
         for i, h in enumerate(highlights):
             job.message = f"Clip {i+1}/{len(highlights)} ban raha hai..."
             job.progress = 55 + int(40 * (i + 1) / len(highlights))
@@ -681,14 +873,18 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
 
             ass = os.path.join(wd, f"clip{i}.ass")
             write_ass(rcues, ass, style=style,
-                      keywords=h.get("keywords"), hl_on=hl_keywords)
+                      keywords=h.get("keywords"), hl_on=hl_keywords,
+                      color_override=(CAPTION_COLORS.get(caption_color)
+                                      if caption_color else None),
+                      ratio=ratio)
             out = os.path.join(outdir, f"clip{i+1}.mp4")
             emoji = h.get("emoji", "") if auto_emoji else ""
             job.message = f"Clip {i+1}/{len(highlights)}: face tracking..."
             face_cx = detect_face_cx(video, s, e)
             cut_clip(video, ass, s, e, out,
                      title=h["title"], emoji=emoji, kept=kept,
-                     face_cx=face_cx)
+                     face_cx=face_cx, ratio=ratio, captions=captions,
+                     hook=(auto_hooks[i] if show_hook else ""))
             # AI B-roll: related photos/videos se main video cover karo
             if broll and pexels_key.strip():
                 try:
@@ -698,12 +894,12 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
                     bro = []
                     for (bs, bd), q in zip(slots, queries):
                         job.message = f"Clip {i+1}: B-roll '{q}' lag raha hai..."
-                        p = pexels_fetch(q, pexels_key.strip(), wd, bd)
+                        p = stock_fetch(q, pexels_key.strip(), wd, bd, ratio)
                         if p:
                             bro.append((bs, bd, p))
                     if bro:
                         tmp = out + ".broll.mp4"
-                        add_broll(out, bro, tmp)
+                        add_broll(out, bro, tmp, ratio)
                         os.replace(tmp, out)
                 except Exception:
                     pass  # B-roll fail -> original clip rehne do

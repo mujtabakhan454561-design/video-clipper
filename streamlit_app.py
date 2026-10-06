@@ -25,9 +25,9 @@ with st.form("clip_form"):
     api_key = st.text_input("Gemini API key (AI highlights ke liye — free)",
                             type="password", placeholder="AIza...",
                             help="Free key: aistudio.google.com/apikey — nahi doge to auto mode chalega.")
-    pexels_key = st.text_input("Pexels API key (AI B-roll visuals ke liye — free)",
+    pexels_key = st.text_input("Pexels / Pixabay API key (AI B-roll ke liye — free)",
                                type="password", placeholder="...",
-                               help="Free key: pexels.com/api — nahi doge to B-roll off rahega.")
+                               help="Free key: pixabay.com/api (foran milti hai) ya pexels.com/api — nahi doge to B-roll off rahega.")
     moment = st.text_input("Find specific moment (optional)",
                            placeholder="e.g. When Sam talks about GPT-5.")
     c1, c2, c3 = st.columns(3)
@@ -35,15 +35,37 @@ with st.form("clip_form"):
     min_dur = c2.number_input("Min seconds", 10, 120, 20)
     max_dur = c3.number_input("Max seconds", 15, 180, 60)
     style = st.selectbox("Clip style",
-                         ["default", "modern", "neon", "beast", "gold", "minimal"],
+                         ["default", "modern", "neon", "beast", "gold", "minimal",
+                          "hormozi", "boxed", "invert", "soft"],
                          format_func=lambda s: {
                              "default": "Default (white)", "modern": "Modern (yellow)",
                              "neon": "Neon (cyan)", "beast": "Beast (red)",
-                             "gold": "Gold", "minimal": "Minimal (small)"}[s])
+                             "gold": "Gold", "minimal": "Minimal (small)",
+                             "hormozi": "Hormozi (bold)", "boxed": "Boxed (black box)",
+                             "invert": "Invert (black)", "soft": "Soft (shadow)"}[s])
+    r1, r2 = st.columns(2)
+    ratio = r1.selectbox("Video ratio",
+                         ["9:16", "4:5", "1:1", "16:9"],
+                         format_func=lambda s: {
+                             "9:16": "9:16 (Reels / TikTok / Shorts)",
+                             "4:5": "4:5 (Instagram portrait)",
+                             "1:1": "1:1 (Square)",
+                             "16:9": "16:9 (YouTube landscape)"}[s])
+    caption_color = r2.selectbox("Caption color",
+                                 ["", "White", "Yellow", "Cyan", "Lime",
+                                  "Red", "Orange", "Pink"],
+                                 format_func=lambda s: "Style default" if s == "" else s,
+                                 help="Screenshot wala style: keywords auto highlight honge.")
     t1, t2, t3 = st.columns(3)
     remove_silence = t1.checkbox("Remove silences")
     hl_keywords = t2.checkbox("Highlight keywords", value=True)
     auto_emoji = t3.checkbox("Auto emoji", value=True)
+    c1, c2 = st.columns(2)
+    show_captions = c1.checkbox("Captions dikhao", value=True)
+    show_hook = c2.checkbox("Hook text (video ke upar)")
+    hook_text = st.text_input("Hook text (khali chhoro to AI khud likhega)",
+                              placeholder="e.g. Wait for it... 😱",
+                              help="Khali chhoro to AI har clip ke liye catchy hook banayega (Gemini key chahiye).") if show_hook else ""
     broll = st.checkbox("🎞 AI B-roll (video se related photos/videos)", value=True,
                         help="Pexels key chahiye — har clip me related visuals auto lag jayenge.")
     go = st.form_submit_button("✂️ Clips Banao", use_container_width=True)
@@ -70,7 +92,10 @@ if go:
                     max_dur=int(max_dur), moment=moment.strip(),
                     remove_silence=remove_silence, style=style,
                     hl_keywords=hl_keywords, auto_emoji=auto_emoji,
-                    pexels_key=pexels_key.strip(), broll=broll),
+                    pexels_key=pexels_key.strip(), broll=broll,
+                    ratio=ratio, captions=show_captions,
+                    caption_color=caption_color,
+                    show_hook=show_hook, hook_text=hook_text.strip()),
     )
     thread.start()
 
