@@ -396,15 +396,16 @@ def ai_hooks(highlights, clip_segs, api_key):
 def fallback_highlights(duration, n_clips, min_dur, max_dur):
     if duration <= 0:
         duration = n_clips * 60
-    clip_len = min(max_dur, max(min_dur, 45))
-    step = max(duration / n_clips, clip_len + 5)
-    out = []
+    # setting ka asar: har clip ki length min..max ke andar, thodi varied
+    lens = [min_dur, (min_dur + max_dur) // 2, max_dur]
+    out, pos = [], 5
     for i in range(n_clips):
-        s = i * step + 5
-        if s + clip_len > duration:
+        clip_len = lens[i % len(lens)]
+        if pos + clip_len > duration:
             break
-        out.append({"start": s, "end": s + clip_len, "title": f"Clip {i+1}",
+        out.append({"start": pos, "end": pos + clip_len, "title": f"Clip {i+1}",
                     "reason": "Auto (AI key nahi di)", "keywords": [], "emoji": "✂️"})
+        pos += clip_len + 5
     return out
 
 
@@ -655,6 +656,7 @@ def pexels_fetch(query, key, workdir, dur, ratio="9:16"):
     uid = uuid.uuid4().hex[:6]
     W, H = RATIOS.get(ratio, RATIOS["9:16"])
     orient = "portrait" if W <= H else "landscape"
+    last_err = ""
     # 1) stock video
     try:
         data = _pexels_json(
@@ -674,8 +676,8 @@ def pexels_fetch(query, key, workdir, dur, ratio="9:16"):
                      "-t", str(dur), "-an", "-c:v", "libx264",
                      "-preset", "veryfast", "-crf", "23", out])
             return out
-    except Exception:
-        pass
+    except Exception as e:
+        last_err = f"video: {e}"[:100]
     # 2) photo fallback -> slow zoom video
     try:
         data = _pexels_json(
@@ -697,9 +699,9 @@ def pexels_fetch(query, key, workdir, dur, ratio="9:16"):
                      "-t", str(dur), "-an", "-c:v", "libx264",
                      "-preset", "veryfast", "-crf", "23", out])
             return out
-    except Exception:
-        pass
-    return None
+    except Exception as e:
+        last_err = f"photo: {e}"[:100]
+    raise RuntimeError(f"Pexels fail ({last_err or 'no result'})")
 
 
 def pixabay_fetch(query, key, workdir, dur, ratio="9:16"):
@@ -708,6 +710,7 @@ def pixabay_fetch(query, key, workdir, dur, ratio="9:16"):
     uid = uuid.uuid4().hex[:6]
     W, H = RATIOS.get(ratio, RATIOS["9:16"])
     orient = "vertical" if W <= H else "horizontal"
+    last_err = ""
     # 1) stock video
     try:
         req = urllib.request.Request(
@@ -731,8 +734,8 @@ def pixabay_fetch(query, key, workdir, dur, ratio="9:16"):
                      "-t", str(dur), "-an", "-c:v", "libx264",
                      "-preset", "veryfast", "-crf", "23", out])
             return out
-    except Exception:
-        pass
+    except Exception as e:
+        last_err = f"video: {e}"[:100]
     # 2) photo fallback -> slow zoom video
     try:
         req = urllib.request.Request(
@@ -755,17 +758,20 @@ def pixabay_fetch(query, key, workdir, dur, ratio="9:16"):
                      "-t", str(dur), "-an", "-c:v", "libx264",
                      "-preset", "veryfast", "-crf", "23", out])
             return out
-    except Exception:
-        pass
-    return None
+    except Exception as e:
+        last_err = f"photo: {e}"[:100]
+    raise RuntimeError(f"Pixabay fail ({last_err or 'no result'})")
 
 
 def stock_fetch(query, key, workdir, dur, ratio="9:16"):
     """Pexels (warna Pixabay) se B-roll lao — jo key chale."""
-    out = pexels_fetch(query, key, workdir, dur, ratio)
-    if out:
-        return out
-    return pixabay_fetch(query, key, workdir, dur, ratio)
+    try:
+        return pexels_fetch(query, key, workdir, dur, ratio)
+    except Exception as e1:
+        try:
+            return pixabay_fetch(query, key, workdir, dur, ratio)
+        except Exception as e2:
+            raise RuntimeError(f"{e1} | {e2}")
 
 
 def _plan_broll_slots(dur):
@@ -945,6 +951,7 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
 
         job.message = "AI best moments dhoond raha hai..."
         job.progress = 50
+        ai_note = ""
         try:
             if moment.strip():
                 highlights = find_moments(cues, moment.strip(), api_key,
@@ -956,11 +963,13 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
                 highlights = fallback_highlights(duration, n_clips, min_dur, max_dur)
         except RuntimeError as e:
             # AI key/model fail -> auto mode se clips banao, rukna nahi
-            job.message = f"AI nahi chala ({e}), auto mode..."
+            ai_note = f"AI nahi chala ({str(e)[:90]}), auto mode use hua"
+            job.message = ai_note + "..."
             highlights = fallback_highlights(duration, n_clips, min_dur, max_dur)
 
         outdir = os.path.join(wd, "clips")
         os.makedirs(outdir, exist_ok=True)
+        broll_errs, broll_used = [], 0
         # Hook: khud likha ho to wahi, warna AI se har clip ke liye banwao
         if show_hook and not hook_text.strip():
             job.message = "AI hooks likh raha hai..."
@@ -1021,15 +1030,21 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
                     bro = []
                     for (bs, bd), q in zip(slots, queries):
                         job.message = f"Clip {i+1}: B-roll '{q}' lag raha hai..."
-                        p = stock_fetch(q, pexels_key.strip(), wd, bd, ratio)
+                        try:
+                            p = stock_fetch(q, pexels_key.strip(), wd, bd, ratio)
+                        except Exception as se:
+                            p = None
+                            broll_errs.append(str(se)[:90])
                         if p:
                             bro.append((bs, bd, p))
                     if bro:
+                        broll_used += len(bro)
                         tmp = out + ".broll.mp4"
                         add_broll(out, bro, tmp, ratio)
                         os.replace(tmp, out)
-                except Exception:
-                    pass  # B-roll fail -> original clip rehne do
+                except Exception as be:
+                    broll_errs.append(str(be)[:90])
+                # B-roll fail -> original clip rehne do
             job.clips.append({
                 "file": f"{job.job_id}/clips/clip{i+1}.mp4",
                 "title": h["title"], "reason": h.get("reason", ""),
@@ -1038,7 +1053,14 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
 
         job.progress = 100
         job.status = "done"
-        job.message = f"{len(job.clips)} clips taiyar!"
+        notes = []
+        if ai_note:
+            notes.append("⚠ " + ai_note)
+        if broll and pexels_key.strip() and broll_used == 0:
+            err = broll_errs[-1] if broll_errs else "koi visual nahi mila"
+            notes.append(f"⚠ B-roll nahi laga ({err}) — key check karo")
+        job.message = f"{len(job.clips)} clips taiyar!" + (
+            " " + " ".join(notes) if notes else "")
     except Exception as e:
         job.status = "error"
         job.message = str(e)[:300]

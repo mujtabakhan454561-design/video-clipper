@@ -168,6 +168,8 @@ if go:
         st.error(job.message)
     else:
         st.success(f"🎬 {len(job.clips)} clips taiyar!")
+        if "⚠" in job.message:
+            st.warning(job.message)
         _save_to_history(workdir, job.clips)  # 24 ghante ke liye save
         for i, c in enumerate(job.clips):
             path = os.path.join(workdir, "clips", f"clip{i+1}.mp4")
