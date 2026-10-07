@@ -107,8 +107,11 @@ def download_video(url: str, workdir: str) -> tuple[str, float, str]:
         if path:
             return path, duration, title.strip()
         last_err = "file download nahi hui"
-    # yt-dlp fail -> Invidious instances se try karo (YouTube ka alternate rasta)
+    # yt-dlp fail -> Cobalt / Invidious se try karo (alternate raste)
     if "youtu" in url or "youtube.com" in url or "y2u.be" in url:
+        cob = _cobalt_download(url, workdir)
+        if cob:
+            return cob
         inv = _invidious_download(url, workdir)
         if inv:
             return inv
@@ -156,6 +159,49 @@ def _invidious_download(url, workdir):
             path = _downloaded_file(workdir)
             if path:
                 return path, dur, title
+        except Exception:
+            continue
+    return None
+
+
+_COBALT_APIS = [
+    "https://cobalt-api.meowing.de/api/json",
+    "https://api.cobalt.tools/api/json",
+    "https://cobalt-api.kwiatekmiki.com/api/json",
+]
+
+
+def _cobalt_download(url, workdir):
+    """Cobalt API se YouTube video lao (koi key nahi chahiye)."""
+    body = json.dumps({"url": url, "videoQuality": "720",
+                       "filenameStyle": "basic"}).encode()
+    for api in _COBALT_APIS:
+        try:
+            req = urllib.request.Request(
+                api, data=body,
+                headers={"Content-Type": "application/json",
+                         "Accept": "application/json",
+                         "User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                data = json.load(r)
+            if data.get("status") not in ("tunnel", "redirect"):
+                continue
+            durl = data.get("url")
+            if not durl:
+                continue
+            _download(durl, os.path.join(workdir, "source.mp4"))
+            path = _downloaded_file(workdir)
+            if path:
+                r2 = subprocess.run(
+                    ["ffprobe", "-v", "error", "-show_entries",
+                     "format=duration",
+                     "-of", "default=noprint_wrappers=1:nokey=1", path],
+                    capture_output=True, text=True)
+                try:
+                    dur = float(r2.stdout.strip())
+                except ValueError:
+                    dur = 0
+                return path, dur, "video"
         except Exception:
             continue
     return None
@@ -398,7 +444,7 @@ def _ass_esc(s: str) -> str:
 
 
 def write_ass(cues, path, style="default", keywords=None, hl_on=False,
-              color_override=None, ratio="9:16"):
+              color_override=None, ratio="9:16", anchor="bottom"):
     W, H = RATIOS.get(ratio, RATIOS["9:16"])
     font, size, color, outline, margin_v, bs, sh, back = STYLES.get(
         style, STYLES["default"])
@@ -434,8 +480,11 @@ def write_ass(cues, path, style="default", keywords=None, hl_on=False,
         for c in cues:
             if c["end"] - c["start"] < 0.15:
                 continue
+            mv = margin_v
+            if anchor == "middle":
+                mv = H // 2 - 60  # split screen: dono chehron ke beech
             f.write(f"Dialogue: 0,{sec_to_ass(c['start'])},{sec_to_ass(c['end'])},"
-                    f"Clip,,0,0,0,,{colorize(c['text'])}\n")
+                    f"Clip,,0,0,{mv},,{colorize(c['text'])}\n")
 
 
 # ---------------- silence removal ----------------
@@ -486,13 +535,12 @@ def retime_cues(cues, kept):
 
 # ---------------- smart crop: face tracking ----------------
 
-def detect_face_cx(video: str, start: float, end: float):
-    """Clip ke andar chehron ki average horizontal position (0..1).
-    Nahi mile to None -> center crop fallback."""
+def _sample_face_cxs(video: str, start: float, end: float):
+    """Clip ke frames me sab chehron ki cx list (0..1)."""
     try:
         import cv2
     except ImportError:
-        return None
+        return []
     try:
         import tempfile
         d = tempfile.mkdtemp(prefix="faces_")
@@ -518,12 +566,39 @@ def detect_face_cx(video: str, start: float, end: float):
                     cxs.append((x + fw / 2) / w)
         import shutil
         shutil.rmtree(d, ignore_errors=True)
-        if not cxs:
-            return None
-        cxs.sort()
-        return cxs[len(cxs) // 2]  # median
+        return cxs
     except Exception:
+        return []
+
+
+def detect_face_cx(video: str, start: float, end: float):
+    """Clip ke andar chehron ki average horizontal position (0..1).
+    Nahi mile to None -> center crop fallback."""
+    cxs = _sample_face_cxs(video, start, end)
+    if not cxs:
         return None
+    cxs.sort()
+    return cxs[len(cxs) // 2]  # median
+
+
+def detect_faces_2(video: str, start: float, end: float):
+    """Split screen ke liye 2 speakers: (cx1, cx2) ya None."""
+    cxs = _sample_face_cxs(video, start, end)
+    if len(cxs) < 6:
+        return None
+    cxs.sort()
+    # sab se bade gap par 2 clusters me baanto
+    best_i, best_gap = 0, 0.0
+    for i in range(1, len(cxs)):
+        g = cxs[i] - cxs[i - 1]
+        if g > best_gap:
+            best_gap, best_i = g, i
+    if best_gap < 0.15:
+        return None  # sab ek hi jagah -> 1 speaker
+    g1, g2 = cxs[:best_i], cxs[best_i:]
+    if len(g1) < 3 or len(g2) < 3:
+        return None
+    return (sum(g1) / len(g1), sum(g2) / len(g2))
 
 
 # ---------------- clip cutting ----------------
@@ -746,16 +821,66 @@ def add_broll(clip_path, slots, out_path, ratio="9:16"):
 
 
 def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
-             kept=None, face_cx=None, ratio="9:16", captions=True, hook=""):
+             kept=None, face_cx=None, ratio="9:16", captions=True, hook="",
+             split_faces=None):
     W, H = RATIOS.get(ratio, RATIOS["9:16"])
     ass_esc = ass_path.replace(":", "\\:").replace("'", "")
-    # scale-to-cover phir smart crop: chehre par focus (vertical), warna center
-    vf = [f"scale={W}:{H}:force_original_aspect_ratio=increase"]
-    if face_cx is not None and W <= H:
-        vf.append(f"crop={W}:{H}:x='clip(in_w*{face_cx:.3f}-{W/2},0,in_w-{W})'"
-                  f":y='(in_h-{H})/2'")
+    af = ["loudnorm=I=-16:TP=-1.5:LRA=11"]  # ek jaisi awaz har clip me
+    if kept:
+        expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
+        af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
+    if split_faces and ratio == "9:16":
+        # double roll: 2 speakers upar-neeche ek saath
+        cx1, cx2 = split_faces
+        parts = []
+        if kept:
+            parts.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
+        parts += [
+            "split[a][b]",
+            f"[a]crop=ih*9/8:ih:x=clip(in_w*{cx1:.3f}-ih*9/16\\,0\\,in_w-ih*9/8),"
+            "scale=1080:960[top]",
+            f"[b]crop=ih*9/8:ih:x=clip(in_w*{cx2:.3f}-ih*9/16\\,0\\,in_w-ih*9/8),"
+            "scale=1080:960[bot]",
+            "[top][bot]vstack=inputs=2[v]",
+        ]
+        if captions:
+            parts.append(f"[v]subtitles='{ass_esc}'[vout]")
+        else:
+            parts.append("[v]null[vout]")
+        if hook:
+            t = _burnable_title(hook).replace(":", "\\:").replace("'", "").replace(",", "\\,")
+            if t:
+                # hook ko vout par lagao: chain ko dobara label karo
+                parts.append(
+                    f"[vout]drawtext=font='DejaVu Sans':"
+                    f"text='{t}':fontsize=54:fontcolor=white:borderw=3:bordercolor=black:"
+                    "x=(w-text_w)/2:y=90[vout2]")
+                vlabel = "[vout2]"
+            else:
+                vlabel = "[vout]"
+        else:
+            vlabel = "[vout]"
+        cmd = ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", video,
+               "-filter_complex", ";".join(parts),
+               "-map", vlabel, "-map", "0:a?"]
+        if af:
+            cmd += ["-af", ",".join(af)]
+        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                "-c:a", "aac", "-b:a", "128k",
+                "-movflags", "+faststart", out_path]
+        run_cmd(cmd)
+        return
     else:
-        vf.append(f"crop={W}:{H}")
+        # scale-to-cover phir smart crop: chehre par focus (vertical), warna center
+        vf = [f"scale={W}:{H}:force_original_aspect_ratio=increase"]
+        if face_cx is not None and W <= H:
+            vf.append(f"crop={W}:{H}:x='clip(in_w*{face_cx:.3f}-{W/2},0,in_w-{W})'"
+                      f":y='(in_h-{H})/2'")
+        else:
+            vf.append(f"crop={W}:{H}")
+        if kept:
+            expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
+            vf.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
     if captions:
         vf.append(f"subtitles='{ass_esc}'")
     if hook:
@@ -765,11 +890,6 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
                 "drawtext=font='DejaVu Sans':"
                 f"text='{t}':fontsize=54:fontcolor=white:borderw=3:bordercolor=black:"
                 "x=(w-text_w)/2:y=90")
-    af = ["loudnorm=I=-16:TP=-1.5:LRA=11"]  # ek jaisi awaz har clip me
-    if kept:
-        expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
-        vf.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
-        af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
     # title overlay hata diya (user ki request) — title sirf app UI me dikhega
     cmd = ["ffmpeg", "-y", "-ss", str(start), "-to", str(end), "-i", video,
            "-vf", ",".join(vf)]
@@ -786,7 +906,8 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             n_clips=3, min_dur=20, max_dur=60, moment="",
             remove_silence=False, style="default", hl_keywords=True,
             auto_emoji=True, pexels_key="", broll=True, ratio="9:16",
-            captions=True, caption_color="", show_hook=False, hook_text=""):
+            captions=True, caption_color="", show_hook=False, hook_text="",
+            split_screen=False):
     try:
         job.status = "running"
         wd = job.workdir
@@ -872,19 +993,25 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
                          if min(c["end"], e) - max(c["start"], s) > 0.15]
 
             ass = os.path.join(wd, f"clip{i}.ass")
+            job.message = f"Clip {i+1}/{len(highlights)}: face tracking..."
+            face_cx = detect_face_cx(video, s, e)
+            split_faces = None
+            if split_screen and ratio == "9:16":
+                job.message = f"Clip {i+1}: 2 speakers dhoond raha hai..."
+                split_faces = detect_faces_2(video, s, e)
             write_ass(rcues, ass, style=style,
                       keywords=h.get("keywords"), hl_on=hl_keywords,
                       color_override=(CAPTION_COLORS.get(caption_color)
                                       if caption_color else None),
-                      ratio=ratio)
+                      ratio=ratio,
+                      anchor=("middle" if split_faces else "bottom"))
             out = os.path.join(outdir, f"clip{i+1}.mp4")
             emoji = h.get("emoji", "") if auto_emoji else ""
-            job.message = f"Clip {i+1}/{len(highlights)}: face tracking..."
-            face_cx = detect_face_cx(video, s, e)
             cut_clip(video, ass, s, e, out,
                      title=h["title"], emoji=emoji, kept=kept,
                      face_cx=face_cx, ratio=ratio, captions=captions,
-                     hook=(auto_hooks[i] if show_hook else ""))
+                     hook=(auto_hooks[i] if show_hook else ""),
+                     split_faces=split_faces)
             # AI B-roll: related photos/videos se main video cover karo
             if broll and pexels_key.strip():
                 try:
