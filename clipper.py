@@ -783,8 +783,72 @@ def pixabay_fetch(query, key, workdir, dur, ratio="9:16"):
     raise RuntimeError(f"Pixabay fail ({last_err or 'no result'})")
 
 
-def stock_fetch(query, key, workdir, dur, ratio="9:16"):
-    """Pexels (warna Pixabay) se B-roll lao — jo key chale."""
+def wikimedia_fetch(query, workdir, dur, ratio="9:16"):
+    """Wikimedia Commons se free photos/videos — koi key nahi chahiye."""
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
+    uid = uuid.uuid4().hex[:6]
+    last_err = ""
+    # 1) photo -> slow zoom video
+    try:
+        q = urllib.parse.quote(f"filetype:bitmap {query}")
+        url = ("https://commons.wikimedia.org/w/api.php?action=query&format=json"
+               f"&generator=search&gsrsearch={q}&gsrnamespace=6&gsrlimit=8"
+               "&prop=imageinfo&iiprop=url|size&iiurlwidth=1280")
+        req = urllib.request.Request(url, headers={"User-Agent": "VideoClipper/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+        pages = list((data.get("query") or {}).get("pages", {}).values())
+        for pg in pages:
+            info = (pg.get("imageinfo") or [{}])[0]
+            link = info.get("thumburl") or info.get("url") or ""
+            if not link.lower().endswith((".jpg", ".jpeg", ".png", ".webp")):
+                continue
+            src = os.path.join(workdir, f"broll_img_{uid}.jpg")
+            _download(link, src)
+            out = os.path.join(workdir, f"broll_{uid}.mp4")
+            run_cmd(["ffmpeg", "-y", "-loop", "1", "-i", src, "-vf",
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                     f"crop={W}:{H},zoompan=z='min(zoom+0.0012,1.25)':d=1:"
+                     "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+                     f"s={W}x{H}:fps=30",
+                     "-t", str(dur), "-an", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "23", out])
+            return out
+        last_err = "koi photo nahi mili"
+    except Exception as e:
+        last_err = f"photo: {e}"[:100]
+    # 2) video
+    try:
+        q = urllib.parse.quote(f"filetype:video {query}")
+        url = ("https://commons.wikimedia.org/w/api.php?action=query&format=json"
+               f"&generator=search&gsrsearch={q}&gsrnamespace=6&gsrlimit=8"
+               "&prop=imageinfo&iiprop=url|size")
+        req = urllib.request.Request(url, headers={"User-Agent": "VideoClipper/1.0"})
+        with urllib.request.urlopen(req, timeout=30) as r:
+            data = json.load(r)
+        pages = list((data.get("query") or {}).get("pages", {}).values())
+        for pg in pages:
+            info = (pg.get("imageinfo") or [{}])[0]
+            link = info.get("url") or ""
+            if not link:
+                continue
+            src = os.path.join(workdir, f"broll_src_{uid}.mp4")
+            _download(link, src)
+            out = os.path.join(workdir, f"broll_{uid}.mp4")
+            run_cmd(["ffmpeg", "-y", "-i", src, "-vf",
+                     f"scale={W}:{H}:force_original_aspect_ratio=increase,"
+                     f"crop={W}:{H},fps=30",
+                     "-t", str(dur), "-an", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "23", out])
+            return out
+        last_err = "koi video nahi mili"
+    except Exception as e:
+        last_err = f"video: {e}"[:100]
+    raise RuntimeError(f"Wikimedia fail ({last_err or 'no result'})")
+
+
+def _keyed_fetch(query, key, workdir, dur, ratio):
+    """Sirf Pexels/Pixabay (key wali services)."""
     try:
         return pexels_fetch(query, key, workdir, dur, ratio)
     except Exception as e1:
@@ -792,6 +856,22 @@ def stock_fetch(query, key, workdir, dur, ratio="9:16"):
             return pixabay_fetch(query, key, workdir, dur, ratio)
         except Exception as e2:
             raise RuntimeError(f"{e1} | {e2}")
+
+
+def stock_fetch(query, key, workdir, dur, ratio="9:16"):
+    """B-roll lao: pehle Pexels/Pixabay (key ho to), warna Wikimedia (free)."""
+    last = ""
+    if key.strip():
+        try:
+            return _keyed_fetch(query, key, workdir, dur, ratio)
+        except Exception as e:
+            last = str(e)
+    else:
+        last = "key nahi di"
+    try:
+        return wikimedia_fetch(query, workdir, dur, ratio)
+    except Exception as e2:
+        raise RuntimeError(f"{last} | Wikimedia: {e2}")
 
 
 def test_gemini_key(api_key):
@@ -808,14 +888,14 @@ def test_gemini_key(api_key):
 
 
 def test_stock_key(key):
-    """(ok, msg): Pexels/Pixabay key sahi hai ya nahi."""
+    """(ok, msg): Pexels/Pixabay key sahi hai ya nahi (sirf key wali)."""
     if not key.strip():
         return False, "Key khali hai"
     import tempfile
     d = tempfile.mkdtemp(prefix="keytest_")
     try:
-        stock_fetch("dog", key.strip(), d, 2, "9:16")
-        return True, "OK — B-roll mil gaya"
+        _keyed_fetch("dog", key.strip(), d, 2, "9:16")
+        return True, "OK — key sahi hai, B-roll mil gaya"
     except Exception as e:
         return False, str(e)[:180]
     finally:
@@ -1070,7 +1150,8 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
                      hook=(auto_hooks[i] if show_hook else ""),
                      split_faces=split_faces)
             # AI B-roll: related photos/videos se main video cover karo
-            if broll and pexels_key.strip():
+            # (key ho to HD, warna Wikimedia se free — key zaroori nahi)
+            if broll:
                 try:
                     dur = sum(b - a for a, b in kept) if kept else (e - s)
                     slots = _plan_broll_slots(dur)
@@ -1104,9 +1185,9 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
         notes = []
         if ai_note:
             notes.append("⚠ " + ai_note)
-        if broll and pexels_key.strip() and broll_used == 0:
+        if broll and broll_used == 0:
             err = broll_errs[-1] if broll_errs else "koi visual nahi mila"
-            notes.append(f"⚠ B-roll nahi laga ({err}) — key check karo")
+            notes.append(f"⚠ B-roll nahi laga ({err})")
         job.message = f"{len(job.clips)} clips taiyar!" + (
             " " + " ".join(notes) if notes else "")
     except Exception as e:

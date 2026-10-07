@@ -125,7 +125,7 @@ with st.container():
     else:
         hook_text = ""
     broll = st.checkbox("🎞 AI B-roll (video se related photos/videos)", value=True,
-                        help="Pexels key chahiye — har clip me related visuals auto lag jayenge.")
+                        help="Key ho to HD visuals, warna Wikimedia se free visuals — key zaroori nahi.")
     split_screen = st.checkbox("👥 Split screen (2 speakers upar-neeche ek saath)",
                                value=False,
                                help="9:16 me 2 chehre dhoond kar double roll banayega. 1 speaker ho to normal clip.")
