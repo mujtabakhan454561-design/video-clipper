@@ -275,7 +275,16 @@ def transcribe_upload(video_path: str):
 
 # ---------------- AI ----------------
 
-_GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
+_GEMINI_MODELS = ["gemini-3.8-flash", "gemini-2.5-flash",
+                 "gemini-2.0-flash", "gemini-1.5-flash"]
+
+def _model_rank(n):
+    """Naya version pehle (3.8 > 2.5), flash family pehle."""
+    import re
+    m = re.search(r"(\d+)\.(\d+)", n)
+    ver = (int(m.group(1)), int(m.group(2))) if m else (0, 0)
+    fam = 0 if "flash" in n else (1 if "pro" in n else 2)
+    return (fam, -ver[0], -ver[1], n)
 
 def _gemini_models(api_key):
     """Google se available models ki list lao (retire hone par auto adjust)."""
@@ -289,7 +298,7 @@ def _gemini_models(api_key):
         name = m.get("name", "").replace("models/", "")
         if "generateContent" in m.get("supportedGenerationMethods", []):
             models.append(name)
-    models.sort(key=lambda n: (0 if "flash" in n else 1, n))
+    models.sort(key=_model_rank)
     return models
 
 
@@ -920,7 +929,7 @@ def test_gemini_key(api_key):
             return True, f"OK — {len(models)} models, AI generate chal raha ({ver}/{models[0]})"
         except Exception as e:
             last = f"{ver}: {e}"[:280]
-    return False, f"List OK ({len(models)} models) lekin AI generate fail: {last} — nayi key banao aistudio.google.com se"
+    return False, f"List OK ({len(models)} models) lekin AI generate fail: {last}"
 
 
 def test_stock_key(key):
