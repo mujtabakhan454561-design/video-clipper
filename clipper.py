@@ -313,8 +313,15 @@ def _gemini_generate(model, prompt, api_key, ver="v1beta"):
     req = urllib.request.Request(url, data=body,
                                  headers={"Content-Type": "application/json",
                                           "User-Agent": "Mozilla/5.0"})
-    with urllib.request.urlopen(req, timeout=60) as resp:
-        data = json.load(resp)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            data = json.load(resp)
+    except urllib.error.HTTPError as e:
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:
+            detail = ""
+        raise RuntimeError(f"HTTP {e.code}: {detail}")
     cands = data.get("candidates") or []
     if not cands:
         raise RuntimeError("AI ne jawab nahi diya")
@@ -912,7 +919,7 @@ def test_gemini_key(api_key):
                              api_key.strip(), ver)
             return True, f"OK — {len(models)} models, AI generate chal raha ({ver}/{models[0]})"
         except Exception as e:
-            last = f"{ver}: {e}"[:120]
+            last = f"{ver}: {e}"[:280]
     return False, f"List OK ({len(models)} models) lekin AI generate fail: {last} — nayi key banao aistudio.google.com se"
 
 
