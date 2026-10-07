@@ -293,29 +293,51 @@ def _gemini_models(api_key):
     return models
 
 
-def _gemini_json(prompt: str, api_key: str):
+def _parse_ai_json(text):
+    t = text.strip()
+    if t.startswith("```"):
+        t = t.split("\n", 1)[1] if "\n" in t else t[3:]
+        if t.rstrip().endswith("```"):
+            t = t.rstrip()[:-3]
+    return json.loads(t.strip())
+
+
+def _gemini_generate(model, prompt, api_key, ver="v1beta"):
+    """Ek model+version par generateContent try karo."""
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"},
     }).encode()
+    url = (f"https://generativelanguage.googleapis.com/{ver}/models/"
+           f"{model}:generateContent?key=" + api_key)
+    req = urllib.request.Request(url, data=body,
+                                 headers={"Content-Type": "application/json",
+                                          "User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
+        data = json.load(resp)
+    cands = data.get("candidates") or []
+    if not cands:
+        raise RuntimeError("AI ne jawab nahi diya")
+    parts = (cands[0].get("content") or {}).get("parts") or []
+    text = "".join(p.get("text", "") for p in parts).strip()
+    if not text:
+        raise RuntimeError("AI ne khaali jawab diya")
+    return text
+
+
+def _gemini_json(prompt: str, api_key: str):
     try:
         models = _gemini_models(api_key) or _GEMINI_MODELS
     except Exception as e:
         raise RuntimeError(f"AI request failed (API key check karo): {e}")
     last_err = "koi model nahi mila"
-    for model in _GEMINI_MODELS:
-        req = urllib.request.Request(
-            f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent?key=" + api_key,
-            data=body, headers={"Content-Type": "application/json"}, method="POST",
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=120) as resp:
-                data = json.load(resp)
-            raw = data["candidates"][0]["content"]["parts"][0]["text"]
-            return json.loads(raw)
-        except Exception as e:
-            last_err = str(e)
-            continue  # agla model try karo (purana retire ho sakta hai)
+    for model in models:
+        for ver in ("v1beta", "v1"):
+            try:
+                return _parse_ai_json(_gemini_generate(model, prompt, api_key, ver))
+            except Exception as e:
+                last_err = f"{ver}/{model}: {e}"[:140]
+                continue  # agla model/version try karo
     raise RuntimeError(f"AI request failed (API key check karo): {last_err}")
 
 
@@ -875,16 +897,23 @@ def stock_fetch(query, key, workdir, dur, ratio="9:16"):
 
 
 def test_gemini_key(api_key):
-    """(ok, msg): Gemini key sahi hai ya nahi."""
+    """(ok, msg): Gemini key + generateContent dono test karo."""
     if not api_key.strip():
         return False, "Key khali hai"
     try:
         models = _gemini_models(api_key.strip())
-        if models:
-            return True, f"OK — {len(models)} models mile ({models[0]})"
-        return False, "Key sahi lekin koi model nahi mila"
     except Exception as e:
         return False, str(e)[:150]
+    if not models:
+        return False, "Key sahi, lekin koi model nahi mila"
+    for ver in ("v1beta", "v1"):
+        try:
+            _gemini_generate(models[0], 'Reply with exactly: {"ok": true}',
+                             api_key.strip(), ver)
+            return True, f"OK — {len(models)} models, AI generate chal raha ({ver}/{models[0]})"
+        except Exception as e:
+            last = f"{ver}: {e}"[:120]
+    return False, f"List OK ({len(models)} models) lekin AI generate fail: {last} — nayi key banao aistudio.google.com se"
 
 
 def test_stock_key(key):
