@@ -678,6 +678,32 @@ _STOPWORDS = set(
     "there here".split())
 
 
+def make_upload_title(h, seg_cues=None):
+    """Upload ke liye ready title: emoji + catchy title + hashtags."""
+    title = (h.get("title") or "Clip").strip()
+    # emoji yaqini banao (AI title me hota hai, auto mode me alag se)
+    if not title or ord(title[0]) < 256:
+        title = f"{h.get('emoji') or '🎬'} {title}"
+    words = []
+    for k in (h.get("keywords") or []):
+        words += re.findall(r"[a-zA-Z]{4,}", k.lower())
+    if not words and seg_cues:
+        freq = {}
+        for c in seg_cues:
+            for w in re.findall(r"[a-zA-Z]{4,}", c["text"].lower()):
+                if w not in _STOPWORDS:
+                    freq[w] = freq.get(w, 0) + 1
+        words = [w for w, _ in sorted(freq.items(), key=lambda x: -x[1])]
+    seen, tags = set(), []
+    for w in words:
+        if w not in seen and w not in _STOPWORDS:
+            seen.add(w)
+            tags.append("#" + w)
+        if len(tags) == 5:
+            break
+    return (title + " " + " ".join(tags)).strip()
+
+
 def _broll_queries(seg_cues, keywords):
     """Clip ke liye 2 Pexels search queries: AI keywords, warna frequent words."""
     qs = [k.strip() for k in (keywords or []) if len(k.strip()) > 2][:2]
@@ -1223,6 +1249,7 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
                 "file": f"{job.job_id}/clips/clip{i+1}.mp4",
                 "title": h["title"], "reason": h.get("reason", ""),
                 "start": round(s, 1), "end": round(e, 1),
+                "upload_title": make_upload_title(h, seg),
             })
 
         job.progress = 100

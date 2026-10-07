@@ -189,6 +189,8 @@ if go:
                                            key=f"dl_{job.job_id}_{i}")
                 if c.get("reason") and not c["reason"].startswith("Auto ("):
                     st.caption(c["reason"])
+                st.caption("📤 Upload title (copy karke Instagram/TikTok par lagao):")
+                st.code(c.get("upload_title") or c["title"])
 
 st.divider()
 
