@@ -69,6 +69,8 @@ with st.container():
                         placeholder="https://www.youtube.com/watch?v=...")
     st.caption("— ya —")
     uploaded = st.file_uploader("Video file upload karo", type=["mp4", "mov", "mkv", "webm"])
+    if uploaded is not None:
+        st.success(f"✓ {uploaded.name} ({uploaded.size/1048576:.1f} MB) ready — ab Clips Banao dabao")
     api_key = st.text_input("Gemini API key (AI highlights ke liye — free)",
                             type="password", placeholder="AIza...",
                             value=_SAVED_GEMINI,

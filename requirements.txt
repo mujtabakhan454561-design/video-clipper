@@ -2,6 +2,7 @@ fastapi
 uvicorn[standard]
 python-multipart
 yt-dlp
+curl_cffi
 requests
 pillow
 opencv-python-headless

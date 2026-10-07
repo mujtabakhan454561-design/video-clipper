@@ -71,14 +71,34 @@ def _downloaded_file(workdir):
 # ---------------- download ----------------
 
 # mukhtalif YouTube clients try karo (koi ek chal jata hai)
-_CLIENT_OPTS = [
-    [],
-    ["--extractor-args", "youtube:player_client=web"],
-    ["--extractor-args", "youtube:player_client=android"],
-    ["--extractor-args", "youtube:player_client=ios"],
-    ["--extractor-args", "youtube:player_client=web_embedded"],
-    ["--extractor-args", "youtube:player_client=tv"],
-]
+def _can_impersonate():
+    try:
+        import importlib.util
+        return importlib.util.find_spec("curl_cffi") is not None
+    except Exception:
+        return False
+
+
+def _client_opts():
+    opts = []
+    if _can_impersonate():
+        # asal Chrome jaisa TLS fingerprint — bot-check se bachne ka naya tareeqa
+        opts.append(["--impersonate", "chrome"])
+        opts.append(["--impersonate", "chrome", "--extractor-args",
+                     "youtube:player_client=web"])
+    opts += [
+        [],
+        ["--extractor-args", "youtube:player_client=web"],
+        ["--extractor-args", "youtube:player_client=android"],
+        ["--extractor-args", "youtube:player_client=ios"],
+        ["--extractor-args", "youtube:player_client=web_embedded"],
+        ["--extractor-args", "youtube:player_client=tv"],
+        ["--extractor-args", "youtube:player_client=mediaconnect"],
+    ]
+    return opts
+
+
+_CLIENT_OPTS = _client_opts()
 
 
 def download_video(url: str, workdir: str) -> tuple[str, float, str]:
@@ -107,11 +127,14 @@ def download_video(url: str, workdir: str) -> tuple[str, float, str]:
         if path:
             return path, duration, title.strip()
         last_err = "file download nahi hui"
-    # yt-dlp fail -> Cobalt / Invidious se try karo (alternate raste)
+    # yt-dlp fail -> Cobalt / Piped / Invidious se try karo (alternate raste)
     if "youtu" in url or "youtube.com" in url or "y2u.be" in url:
         cob = _cobalt_download(url, workdir)
         if cob:
             return cob
+        pip = _piped_download(url, workdir)
+        if pip:
+            return pip
         inv = _invidious_download(url, workdir)
         if inv:
             return inv
@@ -121,12 +144,60 @@ def download_video(url: str, workdir: str) -> tuple[str, float, str]:
         + last_err[-150:])
 
 
+_PIPED_APIS = [
+    "https://api.piped.private.coffee",
+    "https://pipedapi.kavin.rocks",
+    "https://pipedapi.reallyaweso.me",
+    "https://pipedapi.adminforge.de",
+    "https://pipedapi.leptons.xyz",
+    "https://pipedapi.r4fo.com",
+]
+
+
+def _piped_download(url, workdir):
+    """Piped public API se YouTube video lao (YouTube IP block se bachat)."""
+    m = re.search(r"(?:v=|youtu\.be/|shorts/|live/)([\w-]{11})", url)
+    if not m:
+        return None
+    vid = m.group(1)
+    for api in _PIPED_APIS:
+        try:
+            req = urllib.request.Request(
+                f"{api}/streams/{vid}",
+                headers={"User-Agent": "Mozilla/5.0"})
+            with urllib.request.urlopen(req, timeout=25) as r:
+                data = json.load(r)
+            streams = [s for s in (data.get("videoStreams") or [])
+                       if s.get("url") and not s.get("videoOnly")
+                       and "mp4" in (s.get("mimeType") or "")]
+
+            def _q(s):
+                q = re.sub(r"\D", "", s.get("quality") or "") or "0"
+                return int(q)
+
+            streams.sort(key=_q, reverse=True)
+            if not streams:
+                continue
+            dur = float(data.get("duration") or 0)
+            title = data.get("title") or "video"
+            _download(streams[0]["url"], os.path.join(workdir, "source.mp4"))
+            path = _downloaded_file(workdir)
+            if path:
+                return path, dur, title
+        except Exception:
+            continue
+    return None
+
+
 _INVIDIOUS = [
     "https://inv.tux.pizza",
     "https://invidious.nerdvpn.de",
     "https://iv.melmac.space",
     "https://inv.us.projectsegfau.lt",
     "https://vid.puffyan.us",
+    "https://invidious.private.coffee",
+    "https://yt.artemislena.eu",
+    "https://iv.duti.dev",
 ]
 
 
