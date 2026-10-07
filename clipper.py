@@ -277,11 +277,31 @@ def transcribe_upload(video_path: str):
 
 _GEMINI_MODELS = ["gemini-2.5-flash", "gemini-2.0-flash", "gemini-1.5-flash"]
 
+def _gemini_models(api_key):
+    """Google se available models ki list lao (retire hone par auto adjust)."""
+    req = urllib.request.Request(
+        "https://generativelanguage.googleapis.com/v1beta/models?key=" + api_key,
+        headers={"User-Agent": "Mozilla/5.0"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        data = json.load(resp)
+    models = []
+    for m in data.get("models", []):
+        name = m.get("name", "").replace("models/", "")
+        if "generateContent" in m.get("supportedGenerationMethods", []):
+            models.append(name)
+    models.sort(key=lambda n: (0 if "flash" in n else 1, n))
+    return models
+
+
 def _gemini_json(prompt: str, api_key: str):
     body = json.dumps({
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {"response_mime_type": "application/json"},
     }).encode()
+    try:
+        models = _gemini_models(api_key) or _GEMINI_MODELS
+    except Exception as e:
+        raise RuntimeError(f"AI request failed (API key check karo): {e}")
     last_err = "koi model nahi mila"
     for model in _GEMINI_MODELS:
         req = urllib.request.Request(
