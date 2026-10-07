@@ -64,7 +64,7 @@ _SAVED_PEXELS = _saved_key("PEXELS_API_KEY")
 st.title("✂️ AI Video Clipper")
 st.caption("Long video ka link do — AI best moments nikal kar vertical short clips bana dega.")
 
-with st.form("clip_form"):
+with st.container():
     url = st.text_input("YouTube / TikTok / Facebook video link",
                         placeholder="https://www.youtube.com/watch?v=...")
     st.caption("— ya —")
@@ -112,15 +112,18 @@ with st.form("clip_form"):
     c1, c2 = st.columns(2)
     show_captions = c1.checkbox("Captions dikhao", value=True)
     show_hook = c2.checkbox("Hook text (video ke upar)")
-    hook_text = st.text_input("Hook text (khali chhoro to AI khud likhega)",
-                              placeholder="e.g. Wait for it... 😱",
-                              help="Sirf tab lagega jab 'Hook text' tick ho. Khali chhoro to AI har clip ke liye catchy hook banayega (Gemini key chahiye).")
+    if show_hook:
+        hook_text = st.text_input("Hook text (khali chhoro to AI khud likhega)",
+                                  placeholder="e.g. Wait for it... 😱",
+                                  help="Khali chhoro to AI har clip ke liye catchy hook banayega (Gemini key chahiye).")
+    else:
+        hook_text = ""
     broll = st.checkbox("🎞 AI B-roll (video se related photos/videos)", value=True,
                         help="Pexels key chahiye — har clip me related visuals auto lag jayenge.")
     split_screen = st.checkbox("👥 Split screen (2 speakers upar-neeche ek saath)",
                                value=False,
                                help="9:16 me 2 chehre dhoond kar double roll banayega. 1 speaker ho to normal clip.")
-    go = st.form_submit_button("✂️ Clips Banao", use_container_width=True)
+    go = st.button("✂️ Clips Banao", use_container_width=True)
 
 if go:
     if not url.strip() and uploaded is None:
