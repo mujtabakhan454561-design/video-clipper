@@ -11,7 +11,7 @@ import uuid
 
 import streamlit as st
 
-from clipper import Job, run_job
+from clipper import Job, run_job, test_gemini_key, test_stock_key
 
 st.set_page_config(page_title="AI Video Clipper", page_icon="✂️", layout="centered")
 
@@ -79,6 +79,12 @@ with st.container():
                                help="Ek dafa: app Settings → Secrets me PEXELS_API_KEY save karo, phir dobara nahi dalni padegi." + (" ✓ saved" if _SAVED_PEXELS else ""))
     moment = st.text_input("Find specific moment (optional)",
                            placeholder="e.g. When Sam talks about GPT-5.")
+    if st.button("🔑 API keys test karo", help="Gemini aur Pexels/Pixabay key sahi hain ya nahi, foran check karo"):
+        with st.spinner("Keys check ho rahi hain..."):
+            ok1, msg1 = test_gemini_key(api_key)
+            ok2, msg2 = test_stock_key(pexels_key)
+        (st.success if ok1 else st.error)(f"Gemini: {msg1}")
+        (st.success if ok2 else st.error)(f"Pexels/Pixabay: {msg2}")
     c1, c2, c3 = st.columns(3)
     n_clips = c1.number_input("Kitne clips", 1, 8, 3)
     min_dur = c2.number_input("Min seconds", 10, 120, 20)
@@ -181,7 +187,7 @@ if go:
                                            data=f, file_name=f"clip{i+1}.mp4",
                                            mime="video/mp4",
                                            key=f"dl_{job.job_id}_{i}")
-                if c.get("reason"):
+                if c.get("reason") and not c["reason"].startswith("Auto ("):
                     st.caption(c["reason"])
 
 st.divider()

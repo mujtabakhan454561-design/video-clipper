@@ -794,6 +794,34 @@ def stock_fetch(query, key, workdir, dur, ratio="9:16"):
             raise RuntimeError(f"{e1} | {e2}")
 
 
+def test_gemini_key(api_key):
+    """(ok, msg): Gemini key sahi hai ya nahi."""
+    if not api_key.strip():
+        return False, "Key khali hai"
+    try:
+        models = _gemini_models(api_key.strip())
+        if models:
+            return True, f"OK — {len(models)} models mile ({models[0]})"
+        return False, "Key sahi lekin koi model nahi mila"
+    except Exception as e:
+        return False, str(e)[:150]
+
+
+def test_stock_key(key):
+    """(ok, msg): Pexels/Pixabay key sahi hai ya nahi."""
+    if not key.strip():
+        return False, "Key khali hai"
+    import tempfile
+    d = tempfile.mkdtemp(prefix="keytest_")
+    try:
+        stock_fetch("dog", key.strip(), d, 2, "9:16")
+        return True, "OK — B-roll mil gaya"
+    except Exception as e:
+        return False, str(e)[:180]
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
 def _plan_broll_slots(dur):
     """(start, dur) slots: 20s+ par 1, 35s+ par 2."""
     """(start, dur) slots: 20s+ par 1, 35s+ par 2."""
