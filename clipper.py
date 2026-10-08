@@ -741,7 +741,7 @@ def _sample_face_cxs(video: str, start: float, end: float):
             faces = clf.detectMultiScale(gray, 1.2, 4, minSize=(60, 60))
             h, w = gray.shape
             for (x, y, fw, fh) in faces:
-                if fh > h * 0.12:  # chhote false-positive ignore
+                if fh > h * 0.08:  # bahut chhote false-positive ignore
                     cxs.append((x + fw / 2) / w)
         import shutil
         shutil.rmtree(d, ignore_errors=True)
@@ -1278,15 +1278,6 @@ def add_broll(clip_path, slots, out_path, ratio="9:16"):
     run_cmd(cmd)
 
 
-def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
-             kept=None, face_cx=None, ratio="9:16", captions=True, hook="",
-             df=None):
-    W, H = RATIOS.get(ratio, RATIOS["9:16"])
-    ass_esc = ass_path.replace(":", "\\:").replace("'", "")
-    af = ["loudnorm=I=-16:TP=-1.5:LRA=11"]  # ek jaisi awaz har clip me
-    if kept:
-        expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
-        af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
 def _cu_crop(cx):
     """Tight close-up crop (face par focus)."""
     return (f"crop=iw*0.62:ih:x=clip(iw*{cx:.3f}-iw*0.31\\,0\\,iw*0.38):y=0")
@@ -1546,8 +1537,10 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             if df_style != "off" and ratio == "9:16":
                 job.message = f"Clip {i+1}: double frame ({df_style}) bana raha hai..."
                 cx1, cx2 = detect_two_faces(video, s, e)
-                if cx1 is not None:
-                    df = {"style": df_style, "cx1": cx1, "cx2": cx2}
+                if cx1 is None:
+                    # face nahi mila to bhi style ZAROOR lagao — center crop se
+                    cx1 = face_cx if face_cx is not None else 0.5
+                df = {"style": df_style, "cx1": cx1, "cx2": cx2}
             if df and df["style"] in ("classic", "duo", "reverse", "bartop"):
                 anchor = {"classic": "middle", "duo": "duo",
                           "reverse": "reversebar", "bartop": "topbar"}[df["style"]]
