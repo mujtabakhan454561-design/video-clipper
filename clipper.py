@@ -612,7 +612,7 @@ def write_ass(cues, path, style="default", keywords=None, hl_on=False,
                 continue
             mv = margin_v
             if anchor == "middle":
-                mv = H // 2 - 60  # split screen: dono chehron ke beech
+                mv = H // 2 - 160  # double frame: beech wali caption bar ke center me
             f.write(f"Dialogue: 0,{sec_to_ass(c['start'])},{sec_to_ass(c['end'])},"
                     f"Clip,,0,0,{mv},,{colorize(c['text'])}\n")
 
@@ -711,24 +711,25 @@ def detect_face_cx(video: str, start: float, end: float):
     return cxs[len(cxs) // 2]  # median
 
 
-def detect_faces_2(video: str, start: float, end: float):
-    """Split screen ke liye 2 speakers: (cx1, cx2) ya None."""
+def detect_main_face(video: str, start: float, end: float):
+    """Double frame ke liye main speaker ki cx (0..1) ya None."""
     cxs = _sample_face_cxs(video, start, end)
     if len(cxs) < 6:
         return None
     cxs.sort()
-    # sab se bade gap par 2 clusters me baanto
+    # sab se bade gap par 2 clusters; bara cluster = main speaker
     best_i, best_gap = 0, 0.0
     for i in range(1, len(cxs)):
         g = cxs[i] - cxs[i - 1]
         if g > best_gap:
             best_gap, best_i = g, i
     if best_gap < 0.15:
-        return None  # sab ek hi jagah -> 1 speaker
+        return sum(cxs) / len(cxs)  # sab ek jagah -> wahi speaker
     g1, g2 = cxs[:best_i], cxs[best_i:]
-    if len(g1) < 3 or len(g2) < 3:
+    big = g1 if len(g1) >= len(g2) else g2
+    if len(big) < 3:
         return None
-    return (sum(g1) / len(g1), sum(g2) / len(g2))
+    return sum(big) / len(big)
 
 
 # ---------------- clip cutting ----------------
@@ -1105,19 +1106,23 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
     if kept:
         expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
         af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
-    if split_faces and ratio == "9:16":
-        # double roll: 2 speakers upar-neeche ek saath
-        cx1, cx2 = split_faces
+    if split_faces is not None and ratio == "9:16":
+        # reference style: upar tight close-up, beech me caption bar, neeche wide
+        cx = split_faces
+        bar_dur = sum(b - a for a, b in kept) if kept else (end - start)
         parts = []
         if kept:
             parts.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
         parts += [
             "split[a][b]",
-            f"[a]crop=ih*9/8:ih:x=clip(in_w*{cx1:.3f}-ih*9/16\\,0\\,in_w-ih*9/8),"
-            "scale=1080:960[top]",
-            f"[b]crop=ih*9/8:ih:x=clip(in_w*{cx2:.3f}-ih*9/16\\,0\\,in_w-ih*9/8),"
-            "scale=1080:960[bot]",
-            "[top][bot]vstack=inputs=2[v]",
+            f"[a]crop=iw*0.62:ih:x=clip(iw*{cx:.3f}-iw*0.31\\,0\\,iw*0.38):y=0,"
+            "scale=1080:1020:force_original_aspect_ratio=increase,crop=1080:1020,"
+            "setsar=1,fps=30[top]",
+            "[b]crop=iw*0.96:ih*0.96:x=iw*0.02:y=ih*0.02,"
+            "scale=1080:700:force_original_aspect_ratio=increase,crop=1080:700,"
+            "setsar=1,fps=30[bot]",
+            f"color=c=0x0d1b3d:s=1080x200:r=30:d={bar_dur:.1f},format=yuv420p[bar]",
+            "[top][bar][bot]vstack=inputs=3[v]",
         ]
         if captions:
             parts.append(f"[v]subtitles='{ass_esc}'[vout]")
@@ -1276,8 +1281,8 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             face_cx = detect_face_cx(video, s, e)
             split_faces = None
             if split_screen and ratio == "9:16":
-                job.message = f"Clip {i+1}: 2 speakers dhoond raha hai..."
-                split_faces = detect_faces_2(video, s, e)
+                job.message = f"Clip {i+1}: double frame bana raha hai..."
+                split_faces = detect_main_face(video, s, e)
             write_ass(rcues, ass, style=style,
                       keywords=h.get("keywords"), hl_on=hl_keywords,
                       color_override=(CAPTION_COLORS.get(caption_color)
