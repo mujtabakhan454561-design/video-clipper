@@ -612,7 +612,13 @@ def write_ass(cues, path, style="default", keywords=None, hl_on=False,
                 continue
             mv = margin_v
             if anchor == "middle":
-                mv = H // 2 - 160  # double frame: beech wali caption bar ke center me
+                mv = H // 2 - 160  # classic: beech wali bar (center y=1120)
+            elif anchor == "duo":
+                mv = H // 2  # duo: bar center y=960
+            elif anchor == "reversebar":
+                mv = H // 2 + 160  # reverse: bar center y=800
+            elif anchor == "topbar":
+                mv = H - 100  # bartop: upar wali bar (center y=100)
             f.write(f"Dialogue: 0,{sec_to_ass(c['start'])},{sec_to_ass(c['end'])},"
                     f"Clip,,0,0,{mv},,{colorize(c['text'])}\n")
 
@@ -711,25 +717,38 @@ def detect_face_cx(video: str, start: float, end: float):
     return cxs[len(cxs) // 2]  # median
 
 
-def detect_main_face(video: str, start: float, end: float):
-    """Double frame ke liye main speaker ki cx (0..1) ya None."""
+def detect_two_faces(video: str, start: float, end: float):
+    """Double frame ke liye (main_cx, second_cx|None)."""
     cxs = _sample_face_cxs(video, start, end)
     if len(cxs) < 6:
-        return None
+        return (None, None)
     cxs.sort()
-    # sab se bade gap par 2 clusters; bara cluster = main speaker
     best_i, best_gap = 0, 0.0
     for i in range(1, len(cxs)):
         g = cxs[i] - cxs[i - 1]
         if g > best_gap:
             best_gap, best_i = g, i
     if best_gap < 0.15:
-        return sum(cxs) / len(cxs)  # sab ek jagah -> wahi speaker
+        return (sum(cxs) / len(cxs), None)  # 1 speaker
     g1, g2 = cxs[:best_i], cxs[best_i:]
+    if len(g1) < 3 and len(g2) < 3:
+        return (None, None)
     big = g1 if len(g1) >= len(g2) else g2
-    if len(big) < 3:
-        return None
-    return sum(big) / len(big)
+    small = g2 if big is g1 else g1
+    cx1 = sum(big) / len(big)
+    cx2 = sum(small) / len(small) if len(small) >= 3 else None
+    return (cx1, cx2)
+
+
+# double frame styles: naam -> (label)
+DF_STYLES = {
+    "classic": "Classic (close-up upar, wide neeche)",
+    "duo": "Duo (2 speakers upar-neeche)",
+    "reverse": "Reverse (wide upar, close-up neeche)",
+    "pip": "PIP (chhoti window corner me)",
+    "bartop": "Bar Top (captions sab se upar)",
+    "clean": "Clean (bina bar ke)",
+}
 
 
 # ---------------- clip cutting ----------------
@@ -776,7 +795,7 @@ def make_upload_title(h, seg_cues=None):
     return (title + " " + " ".join(tags)).strip()
 
 
-def _draw_double_frame_diagram(path):
+def draw_df_diagram(style, path):
     """Double frame layout ka simple diagram (PIL se, koi video nahi chahiye)."""
     try:
         from PIL import Image, ImageDraw
@@ -785,21 +804,58 @@ def _draw_double_frame_diagram(path):
     W, H = 540, 960
     img = Image.new("RGB", (W, H), (8, 12, 24))
     dr = ImageDraw.Draw(img)
-    # upar: close-up (face)
-    dr.rectangle([0, 0, W, 500], fill=(96, 64, 52))
-    dr.ellipse([W // 2 - 95, 110, W // 2 + 95, 300], fill=(214, 172, 140))
-    dr.rectangle([W // 2 - 95, 300, W // 2 + 95, 380], fill=(60, 60, 64))
-    dr.text((20, 20), "CLOSE-UP", fill=(255, 255, 255))
-    # beech: caption bar
-    dr.rectangle([0, 500, W, 610], fill=(13, 27, 61))
-    dr.rectangle([90, 535, 450, 552], fill=(255, 255, 255))
-    dr.rectangle([170, 560, 370, 577], fill=(255, 235, 0))
-    dr.text((20, 520), "CAPTIONS", fill=(160, 180, 220))
-    # neeche: wide shot
-    dr.rectangle([0, 610, W, 960], fill=(36, 48, 66))
-    dr.rectangle([40, 700, 500, 880], fill=(52, 68, 90))
-    dr.ellipse([230, 730, 310, 810], fill=(214, 172, 140))
-    dr.text((20, 630), "WIDE SHOT", fill=(255, 255, 255))
+    FACE = (214, 172, 140)
+    BAR = (13, 27, 61)
+    def face(cx, cy, r):
+        dr.ellipse([cx - r, cy - r, cx + r, cy + r], fill=FACE)
+    def bar(y0, h=110, label="CAPTIONS"):
+        dr.rectangle([0, y0, W, y0 + h], fill=BAR)
+        dr.rectangle([90, y0 + 38, 450, y0 + 55], fill=(255, 255, 255))
+        dr.rectangle([170, y0 + 63, 370, y0 + 80], fill=(255, 235, 0))
+        dr.text((16, y0 + 12), label, fill=(160, 180, 220))
+    def panel(y0, y1, kind, label, fx=None):
+        dr.rectangle([0, y0, W, y1], fill=(96, 64, 52) if kind == "cu" else (36, 48, 66))
+        dr.text((16, y0 + 12), label, fill=(255, 255, 255))
+        if kind == "cu":
+            face(W // 2 if fx is None else int(W * fx), (y0 + y1) // 2 - 20, 85)
+            dr.rectangle([W // 2 - 90, (y0 + y1) // 2 + 65, W // 2 + 90, (y0 + y1) // 2 + 130],
+                         fill=(60, 60, 64))
+        else:
+            dr.rectangle([60, y0 + 90, W - 60, y1 - 60], fill=(52, 68, 90))
+            face(W // 2, (y0 + y1) // 2 - 30, 45)
+    if style == "classic":
+        panel(0, 500, "cu", "CLOSE-UP")
+        bar(500)
+        panel(610, 960, "wide", "WIDE SHOT")
+    elif style == "duo":
+        panel(0, 425, "cu", "SPEAKER 1", fx=0.38)
+        bar(425)
+        panel(535, 960, "cu", "SPEAKER 2", fx=0.62)
+    elif style == "reverse":
+        panel(0, 350, "wide", "WIDE SHOT")
+        bar(350)
+        panel(460, 960, "cu", "CLOSE-UP")
+    elif style == "pip":
+        dr.rectangle([0, 0, W, H], fill=(36, 48, 66))
+        dr.rectangle([60, 120, W - 60, 700], fill=(52, 68, 90))
+        face(W // 2, 350, 60)
+        dr.text((16, 16), "FULL VIDEO", fill=(255, 255, 255))
+        dr.rectangle([W - 200, 60, W - 40, 220], fill=(96, 64, 52),
+                     outline=(255, 255, 255), width=3)
+        face(W - 120, 140, 45)
+        dr.text((16, 760), "CAPTIONS (bottom)", fill=(200, 210, 230))
+        dr.rectangle([90, 810, 450, 830], fill=(255, 255, 255))
+        dr.rectangle([170, 840, 370, 860], fill=(255, 235, 0))
+    elif style == "bartop":
+        bar(0)
+        panel(110, 610, "cu", "CLOSE-UP")
+        panel(610, 960, "wide", "WIDE SHOT")
+    else:  # clean
+        panel(0, 480, "cu", "CLOSE-UP")
+        panel(480, 960, "wide", "WIDE SHOT")
+        dr.text((16, 800), "CAPTIONS (bottom)", fill=(200, 210, 230))
+        dr.rectangle([90, 850, 450, 870], fill=(255, 255, 255))
+        dr.rectangle([170, 880, 370, 900], fill=(255, 235, 0))
     img.save(path)
     return True
 
@@ -831,8 +887,10 @@ def ensure_previews():
                          os.path.join(d, f"{style}.png")])
                 if os.path.isfile(ass):
                     os.remove(ass)
-        if not os.path.isfile(os.path.join(d, "double_frame.png")):
-            _draw_double_frame_diagram(os.path.join(d, "double_frame.png"))
+        for _st in ("classic", "duo", "reverse", "pip", "bartop", "clean"):
+            _dp = os.path.join(d, f"df_{_st}.png")
+            if not os.path.isfile(_dp):
+                draw_df_diagram(_st, _dp)
     except Exception:
         pass
     return d
@@ -1161,31 +1219,91 @@ def add_broll(clip_path, slots, out_path, ratio="9:16"):
 
 def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
              kept=None, face_cx=None, ratio="9:16", captions=True, hook="",
-             split_faces=None):
+             df=None):
     W, H = RATIOS.get(ratio, RATIOS["9:16"])
     ass_esc = ass_path.replace(":", "\\:").replace("'", "")
     af = ["loudnorm=I=-16:TP=-1.5:LRA=11"]  # ek jaisi awaz har clip me
     if kept:
         expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
         af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
-    if split_faces is not None and ratio == "9:16":
-        # reference style: upar tight close-up, beech me caption bar, neeche wide
-        cx = split_faces
+def _cu_crop(cx):
+    """Tight close-up crop (face par focus)."""
+    return (f"crop=iw*0.62:ih:x=clip(iw*{cx:.3f}-iw*0.31\\,0\\,iw*0.38):y=0")
+
+
+_WIDE_CROP = "crop=iw*0.96:ih*0.96:x=iw*0.02:y=ih*0.02"
+
+
+def _sc_wh(w, h):
+    """Scale-to-cover + SAR fix (double frame panels ke liye)."""
+    return (f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+            f"crop={w}:{h},setsar=1,fps=30,format=yuv420p")
+
+
+def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
+             kept=None, face_cx=None, ratio="9:16", captions=True, hook="",
+             df=None):
+    W, H = RATIOS.get(ratio, RATIOS["9:16"])
+    ass_esc = ass_path.replace(":", "\\:").replace("'", "")
+    af = ["loudnorm=I=-16:TP=-1.5:LRA=11"]  # ek jaisi awaz har clip me
+    if kept:
+        expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
+        af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
+    if df and ratio == "9:16":
+        # 6 double frame styles
+        style = df.get("style", "classic")
+        cx1 = df.get("cx1", 0.5)
+        cx2 = df.get("cx2")
         bar_dur = sum(b - a for a, b in kept) if kept else (end - start)
+        hook_y = 90
         parts = []
         if kept:
             parts.append(f"select='{expr}',setpts=N/FRAME_RATE/TB")
-        parts += [
-            "split[a][b]",
-            f"[a]crop=iw*0.62:ih:x=clip(iw*{cx:.3f}-iw*0.31\\,0\\,iw*0.38):y=0,"
-            "scale=1080:1020:force_original_aspect_ratio=increase,crop=1080:1020,"
-            "setsar=1,fps=30[top]",
-            "[b]crop=iw*0.96:ih*0.96:x=iw*0.02:y=ih*0.02,"
-            "scale=1080:700:force_original_aspect_ratio=increase,crop=1080:700,"
-            "setsar=1,fps=30[bot]",
-            f"color=c=0x0d1b3d:s=1080x200:r=30:d={bar_dur:.1f},format=yuv420p[bar]",
-            "[top][bar][bot]vstack=inputs=3[v]",
-        ]
+        parts.append("split[a][b]")
+        bar = (f"color=c=0x0d1b3d:s=1080x200:r=30:d={bar_dur:.1f},"
+               "format=yuv420p[bar]")
+        if style == "pip":
+            parts += [
+                f"[a]{_cu_crop(cx1)},{_sc_wh(440, 440)}[ins]",
+                f"[b]{_sc_wh(1080, 1920)}[bg]",
+                "[bg][ins]overlay=x=W-w-40:y=170,format=yuv420p[v]",
+            ]
+        elif style == "clean":
+            parts += [
+                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 960)}[top]",
+                f"[b]{_WIDE_CROP},{_sc_wh(1080, 960)}[bot]",
+                "[top][bot]vstack=inputs=2[v]",
+            ]
+        elif style == "duo":
+            parts.append(bar)
+            bot_src = _cu_crop(cx2) if cx2 is not None else _WIDE_CROP
+            parts += [
+                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 860)}[top]",
+                f"[b]{bot_src},{_sc_wh(1080, 860)}[bot]",
+                "[top][bar][bot]vstack=inputs=3[v]",
+            ]
+        elif style == "reverse":
+            parts.append(bar)
+            parts += [
+                f"[a]{_WIDE_CROP},{_sc_wh(1080, 700)}[top]",
+                f"[b]{_cu_crop(cx1)},{_sc_wh(1080, 1020)}[bot]",
+                "[top][bar][bot]vstack=inputs=3[v]",
+            ]
+        elif style == "bartop":
+            parts.append(bar)
+            hook_y = 240
+            parts += [
+                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 1020)}[mid]",
+                f"[b]{_WIDE_CROP},{_sc_wh(1080, 700)}[bot]",
+                "[bar][mid][bot]vstack=inputs=3[v]",
+            ]
+        else:  # classic
+            parts.append(bar)
+            parts += [
+                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 1020)}[top]",
+                f"[b]{_WIDE_CROP},{_sc_wh(1080, 700)}[bot]",
+                "[top][bar][bot]vstack=inputs=3[v]",
+            ]
         if captions:
             parts.append(f"[v]subtitles='{ass_esc}'[vout]")
         else:
@@ -1197,7 +1315,7 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
                 parts.append(
                     f"[vout]drawtext=font='DejaVu Sans':"
                     f"text='{t}':fontsize=54:fontcolor=white:borderw=3:bordercolor=black:"
-                    "x=(w-text_w)/2:y=90[vout2]")
+                    f"x=(w-text_w)/2:y={hook_y}[vout2]")
                 vlabel = "[vout2]"
             else:
                 vlabel = "[vout]"
@@ -1250,7 +1368,7 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             remove_silence=False, style="default", hl_keywords=True,
             auto_emoji=True, pexels_key="", broll=True, ratio="9:16",
             captions=True, caption_color="", show_hook=False, hook_text="",
-            split_screen=False):
+            df_style="off"):
     try:
         job.status = "running"
         wd = job.workdir
@@ -1341,23 +1459,29 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             ass = os.path.join(wd, f"clip{i}.ass")
             job.message = f"Clip {i+1}/{len(highlights)}: face tracking..."
             face_cx = detect_face_cx(video, s, e)
-            split_faces = None
-            if split_screen and ratio == "9:16":
-                job.message = f"Clip {i+1}: double frame bana raha hai..."
-                split_faces = detect_main_face(video, s, e)
+            df = None
+            if df_style != "off" and ratio == "9:16":
+                job.message = f"Clip {i+1}: double frame ({df_style}) bana raha hai..."
+                cx1, cx2 = detect_two_faces(video, s, e)
+                if cx1 is not None:
+                    df = {"style": df_style, "cx1": cx1, "cx2": cx2}
+            if df and df["style"] in ("classic", "duo", "reverse", "bartop"):
+                anchor = {"classic": "middle", "duo": "duo",
+                          "reverse": "reversebar", "bartop": "topbar"}[df["style"]]
+            else:
+                anchor = "bottom"
             write_ass(rcues, ass, style=style,
                       keywords=h.get("keywords"), hl_on=hl_keywords,
                       color_override=(CAPTION_COLORS.get(caption_color)
                                       if caption_color else None),
-                      ratio=ratio,
-                      anchor=("middle" if split_faces else "bottom"))
+                      ratio=ratio, anchor=anchor)
             out = os.path.join(outdir, f"clip{i+1}.mp4")
             emoji = h.get("emoji", "") if auto_emoji else ""
             cut_clip(video, ass, s, e, out,
                      title=h["title"], emoji=emoji, kept=kept,
                      face_cx=face_cx, ratio=ratio, captions=captions,
                      hook=(auto_hooks[i] if show_hook else ""),
-                     split_faces=split_faces)
+                     df=df)
             # AI B-roll: related photos/videos se main video cover karo
             # (key ho to HD, warna Wikimedia se free — key zaroori nahi)
             if broll:

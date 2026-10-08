@@ -11,7 +11,7 @@ import uuid
 
 import streamlit as st
 
-from clipper import Job, run_job, test_gemini_key, test_stock_key, ensure_previews
+from clipper import Job, run_job, test_gemini_key, test_stock_key, ensure_previews, DF_STYLES
 
 
 @st.cache_resource
@@ -147,17 +147,22 @@ with st.container():
         hook_text = ""
     broll = st.checkbox("🎞 AI B-roll (video se related photos/videos)", value=True,
                         help="Key ho to HD visuals, warna Wikimedia se free visuals — key zaroori nahi.")
-    split_screen = st.checkbox("🎬 Double frame (upar close-up + neeche wide, beech me captions)",
-                               value=False,
-                               help="9:16 me speaker ka close-up upar, wide shot neeche, beech me caption bar.")
-    with st.expander("👀 Double frame demo dekho"):
-        _dp = os.path.join(PREVIEW_DIR, "double_frame.png")
+    df_style = st.selectbox("🎬 Double frame style",
+                            ["off", "classic", "duo", "reverse", "pip", "bartop", "clean"],
+                            format_func=lambda s: {"off": "Off (normal clip)",
+                                                   **DF_STYLES}[s],
+                            help="9:16 me double frame layout. Preview neeche dekho.")
+    if df_style != "off":
+        _dp = os.path.join(PREVIEW_DIR, f"df_{df_style}.png")
         if os.path.isfile(_dp):
-            st.image(_dp,
-                     caption="Double frame demo — upar close-up, beech me captions, neeche wide",
-                     use_container_width=True)
-        else:
-            st.caption("Demo image nahi mili.")
+            st.image(_dp, caption=DF_STYLES[df_style], width=220)
+    with st.expander("👀 Double frame styles gallery (6 styles)"):
+        _dg = st.columns(2)
+        for _i, _ds in enumerate(["classic", "duo", "reverse", "pip", "bartop", "clean"]):
+            with _dg[_i % 2]:
+                _pp = os.path.join(PREVIEW_DIR, f"df_{_ds}.png")
+                if os.path.isfile(_pp):
+                    st.image(_pp, caption=DF_STYLES[_ds], use_container_width=True)
     go = st.button("✂️ Clips Banao", use_container_width=True)
 
 if go:
@@ -186,7 +191,7 @@ if go:
                     ratio=ratio, captions=show_captions,
                     caption_color=caption_color,
                     show_hook=show_hook, hook_text=hook_text.strip(),
-                    split_screen=split_screen),
+                    df_style=df_style),
     )
     thread.start()
 
