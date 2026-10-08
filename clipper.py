@@ -336,12 +336,17 @@ def transcribe_upload(video_path: str):
             "YouTube link use karo (captions auto mil jayenge)."
         )
     model = WhisperModel("tiny", device="cpu", compute_type="int8")
-    segments, info = model.transcribe(video_path)
+    segments, info = model.transcribe(video_path, word_timestamps=True)
     print("detected language:", info.language)
-    return [
-        {"start": s.start, "end": s.end, "text": s.text.strip()}
-        for s in segments if s.text.strip()
-    ]
+    out = []
+    for s in segments:
+        if not s.text.strip():
+            continue
+        words = [{"start": w.start, "end": w.end, "text": w.word.strip()}
+                 for w in (s.words or []) if w.word.strip()]
+        out.append({"start": s.start, "end": s.end, "text": s.text.strip(),
+                    "words": words})
+    return out
 
 
 # ---------------- AI ----------------
@@ -574,7 +579,7 @@ def _ass_esc(s: str) -> str:
 
 
 def write_ass(cues, path, style="default", keywords=None, hl_on=False,
-              color_override=None, ratio="9:16", anchor="bottom"):
+              color_override=None, ratio="9:16", anchor="bottom", raw_tags=False):
     W, H = RATIOS.get(ratio, RATIOS["9:16"])
     font, size, color, outline, margin_v, bs, sh, back = STYLES.get(
         style, STYLES["default"])
@@ -587,7 +592,7 @@ def write_ass(cues, path, style="default", keywords=None, hl_on=False,
     kws = [k for k in (keywords or []) if len(k) > 2]
 
     def colorize(text):
-        t = _ass_esc(text)
+        t = text if raw_tags else _ass_esc(text)
         if hl_on and kws:
             for k in kws:
                 t = re.sub(
@@ -654,6 +659,44 @@ def kept_segments(start, end, silences):
     return [(a, b) for a, b in kept if b - a >= 0.8]
 
 
+def _even_words(start, end, text):
+    """Word timings nahi hain to evenly distribute karo (fallback)."""
+    ws = text.split()
+    if not ws:
+        return []
+    dur = max(0.1, end - start)
+    per = dur / len(ws)
+    return [{"start": start + i * per, "end": start + (i + 1) * per, "text": w}
+            for i, w in enumerate(ws)]
+
+
+def build_karaoke_cues(words, max_chars=26, active_tag="{\\c&H0000FFFF&}"):
+    """Lafz-ba-lafz highlight wale cues (karaoke style animation).
+    Har lafz apne time par highlight hota hai, poori line visible rehti hai."""
+    lines, cur = [], []
+    for w in words:
+        t = " ".join(x["text"] for x in cur + [w])
+        if cur and len(t) > max_chars:
+            lines.append(cur)
+            cur = [w]
+        else:
+            cur.append(w)
+    if cur:
+        lines.append(cur)
+    cues = []
+    for line in lines:
+        texts = [w["text"] for w in line]
+        for k, w in enumerate(line):
+            wend = line[k + 1]["start"] if k + 1 < len(line) else line[-1]["end"]
+            if wend - w["start"] < 0.05:
+                continue
+            parts = [(f"{active_tag}{t}{{\\r}}" if m == k else t)
+                     for m, t in enumerate(texts)]
+            cues.append({"start": w["start"], "end": wend,
+                         "text": " ".join(parts)})
+    return cues
+
+
 def retime_cues(cues, kept):
     """Captions ko silence-removed timeline par dobara fit karo."""
     out, offset = [], 0.0
@@ -718,26 +761,27 @@ def detect_face_cx(video: str, start: float, end: float):
 
 
 def detect_two_faces(video: str, start: float, end: float):
-    """Double frame ke liye (main_cx, second_cx|None)."""
+    """Double frame ke liye (main_cx, second_cx|None). 1 face mile to bhi kaam karega."""
     cxs = _sample_face_cxs(video, start, end)
-    if len(cxs) < 6:
+    if not cxs:
         return (None, None)
     cxs.sort()
+    cx1 = cxs[len(cxs) // 2]  # median = main speaker
+    if len(cxs) < 3:
+        return (cx1, None)
+    # dusra cluster dhoondo (duo style ke liye)
     best_i, best_gap = 0, 0.0
     for i in range(1, len(cxs)):
         g = cxs[i] - cxs[i - 1]
         if g > best_gap:
             best_gap, best_i = g, i
     if best_gap < 0.15:
-        return (sum(cxs) / len(cxs), None)  # 1 speaker
+        return (cx1, None)  # 1 speaker
     g1, g2 = cxs[:best_i], cxs[best_i:]
-    if len(g1) < 3 and len(g2) < 3:
-        return (None, None)
-    big = g1 if len(g1) >= len(g2) else g2
-    small = g2 if big is g1 else g1
-    cx1 = sum(big) / len(big)
-    cx2 = sum(small) / len(small) if len(small) >= 3 else None
-    return (cx1, cx2)
+    if len(g1) < 2 or len(g2) < 2:
+        return (cx1, None)
+    small = g1 if len(g1) < len(g2) else g2
+    return (cx1, small[len(small) // 2])
 
 
 # double frame styles: naam -> (label)
@@ -869,13 +913,13 @@ def ensure_previews():
     except Exception:
         return d
     try:
+        bg = os.path.join(d, "_bg.png")
+        if not os.path.isfile(bg):
+            run_cmd(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                     "-i", "color=c=0x1a1a2e:s=1080x1920:r=30:d=1",
+                     "-frames:v", "1", bg])
         need = [s for s in STYLES if not os.path.isfile(os.path.join(d, f"{s}.png"))]
         if need:
-            bg = os.path.join(d, "_bg.png")
-            if not os.path.isfile(bg):
-                run_cmd(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
-                         "-i", "color=c=0x1a1a2e:s=1080x1920:r=30:d=1",
-                         "-frames:v", "1", bg])
             cues = [{"start": 0, "end": 5, "text": "ye moment sab se best hai"}]
             for style in need:
                 ass = os.path.join(d, f"_{style}.ass")
@@ -891,6 +935,23 @@ def ensure_previews():
             _dp = os.path.join(d, f"df_{_st}.png")
             if not os.path.isfile(_dp):
                 draw_df_diagram(_st, _dp)
+        _kp = os.path.join(d, "karaoke.png")
+        if not os.path.isfile(_kp):
+            _kass = os.path.join(d, "_karaoke.ass")
+            _kcues = build_karaoke_cues(
+                [{"start": i * 0.4, "end": i * 0.4 + 0.38, "text": w}
+                 for i, w in enumerate("ye moment sab se best hai".split())],
+                max_chars=26)
+            write_ass(_kcues, _kass, style="hormozi", hl_on=False,
+                      ratio="9:16", anchor="bottom", raw_tags=True)
+            _kesc = _kass.replace(":", "\\:").replace("'", "")
+            try:
+                run_cmd(["ffmpeg", "-y", "-v", "error", "-i", bg, "-vf",
+                         f"subtitles='{_kesc}'", "-frames:v", "1", _kp])
+            except Exception:
+                pass
+            if os.path.isfile(_kass):
+                os.remove(_kass)
     except Exception:
         pass
     return d
@@ -1368,7 +1429,7 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             remove_silence=False, style="default", hl_keywords=True,
             auto_emoji=True, pexels_key="", broll=True, ratio="9:16",
             captions=True, caption_color="", show_hook=False, hook_text="",
-            df_style="off"):
+            df_style="off", animated_captions=False):
     try:
         job.status = "running"
         wd = job.workdir
@@ -1442,19 +1503,41 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
 
             seg = [c for c in cues if c["end"] > s and c["start"] < e]
             kept = None
+            ks_abs = None
             if remove_silence:
                 sil = detect_silences(video, s, e)
                 ks = kept_segments(s, e, sil)
                 if ks and sum(b - a for a, b in ks) >= 3:
-                    # -ss ke baad timestamps 0-based hote hain -> relative karo
+                    ks_abs = ks
                     kept = [(a - s, b - s) for a, b in ks]
-            if kept:
-                rcues, _ = retime_cues(cues, kept)
+            if animated_captions:
+                # lafz-ba-lafz animated captions (karaoke style)
+                wlist = []
+                for c in cues:
+                    ws = c.get("words") or _even_words(c["start"], c["end"], c["text"])
+                    wlist.extend(ws)
+                if ks_abs:
+                    wlist, _ = retime_cues(wlist, ks_abs)
+                else:
+                    wlist = [{"start": max(w["start"], s) - s,
+                              "end": min(w["end"], e) - s,
+                              "text": w["text"]} for w in wlist
+                             if w["end"] > s and w["start"] < e
+                             and min(w["end"], e) - max(w["start"], s) > 0.05]
+                active = ("{\\c&H00FFFFFF&}" if style in ("modern", "gold")
+                          else "{\\c&H0000FFFF&}")
+                mc = 26 if ratio == "9:16" else 48
+                rcues = build_karaoke_cues(wlist, max_chars=mc, active_tag=active)
+                hl_for_ass = False
             else:
-                rcues = [{"start": max(c["start"], s) - s,
-                          "end": min(c["end"], e) - s,
-                          "text": c["text"]} for c in seg
-                         if min(c["end"], e) - max(c["start"], s) > 0.15]
+                if kept:
+                    rcues, _ = retime_cues(cues, ks_abs)
+                else:
+                    rcues = [{"start": max(c["start"], s) - s,
+                              "end": min(c["end"], e) - s,
+                              "text": c["text"]} for c in seg
+                             if min(c["end"], e) - max(c["start"], s) > 0.15]
+                hl_for_ass = hl_keywords
 
             ass = os.path.join(wd, f"clip{i}.ass")
             job.message = f"Clip {i+1}/{len(highlights)}: face tracking..."
@@ -1471,10 +1554,11 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             else:
                 anchor = "bottom"
             write_ass(rcues, ass, style=style,
-                      keywords=h.get("keywords"), hl_on=hl_keywords,
+                      keywords=h.get("keywords"), hl_on=hl_for_ass,
                       color_override=(CAPTION_COLORS.get(caption_color)
                                       if caption_color else None),
-                      ratio=ratio, anchor=anchor)
+                      ratio=ratio, anchor=anchor,
+                      raw_tags=animated_captions)
             out = os.path.join(outdir, f"clip{i+1}.mp4")
             emoji = h.get("emoji", "") if auto_emoji else ""
             cut_clip(video, ass, s, e, out,

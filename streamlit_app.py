@@ -119,6 +119,12 @@ with st.container():
                 _pp = os.path.join(PREVIEW_DIR, f"{_sn}.png")
                 if os.path.isfile(_pp):
                     st.image(_pp, caption=_sn, use_container_width=True)
+    animated_captions = st.checkbox("⚡ Animated captions (lafz-ba-lafz highlight)",
+                                    value=False,
+                                    help="Har lafz bolne par highlight hoga — TikTok/Reels viral style.")
+    _kp = os.path.join(PREVIEW_DIR, "karaoke.png")
+    if os.path.isfile(_kp):
+        st.image(_kp, caption="Animated captions preview", width=220)
     r1, r2 = st.columns(2)
     ratio = r1.selectbox("Video ratio",
                          ["9:16", "4:5", "1:1", "16:9"],
@@ -191,7 +197,7 @@ if go:
                     ratio=ratio, captions=show_captions,
                     caption_color=caption_color,
                     show_hook=show_hook, hook_text=hook_text.strip(),
-                    df_style=df_style),
+                    df_style=df_style, animated_captions=animated_captions),
     )
     thread.start()
 
