@@ -774,7 +774,9 @@ def detect_face_box(video: str, start: float, end: float):
 
 
 def detect_two_face_boxes(video: str, start: float, end: float):
-    """Double frame ke liye (main_box, second_box|None). Box = (cx, cy, fh)."""
+    """Double frame ke liye (main_box, second_box|None). Box = (cx, cy, fh).
+    main = bare cluster ka chehra (speaker), second = chhote cluster ka
+    chehra (listener) — dono hamesha ALAG bande, kabhi same nahi."""
     faces = _sample_faces(video, start, end)
     if not faces:
         return (None, None)
@@ -793,8 +795,11 @@ def detect_two_face_boxes(video: str, start: float, end: float):
     g1, g2 = faces[:best_i], faces[best_i:]
     if len(g1) < 2 or len(g2) < 2:
         return (main, None)
-    small = g1 if len(g1) < len(g2) else g2
-    return (main, small[len(small) // 2])
+    # bara group = speaker (upar tight close-up), chhota group = listener (neeche)
+    # dono ALAG cluster se — upar-neeche kabhi same banda nahi aayega
+    large = g1 if len(g1) >= len(g2) else g2
+    small = g2 if large is g1 else g1
+    return (large[len(large) // 2], small[len(small) // 2])
 
 
 def detect_two_faces(video: str, start: float, end: float):
