@@ -11,7 +11,15 @@ import uuid
 
 import streamlit as st
 
-from clipper import Job, run_job, test_gemini_key, test_stock_key
+from clipper import Job, run_job, test_gemini_key, test_stock_key, ensure_previews
+
+
+@st.cache_resource
+def _preview_dir():
+    return ensure_previews()
+
+
+PREVIEW_DIR = _preview_dir()
 
 st.set_page_config(page_title="AI Video Clipper", page_icon="✂️", layout="centered")
 
@@ -100,7 +108,7 @@ with st.container():
                              "gold": "Gold", "minimal": "Minimal (small)",
                              "hormozi": "Hormozi (bold)", "boxed": "Boxed (black box)",
                              "invert": "Invert (black)", "soft": "Soft (shadow)"}[s])
-    _sp = f"previews/{style}.png"
+    _sp = os.path.join(PREVIEW_DIR, f"{style}.png")
     if os.path.isfile(_sp):
         st.image(_sp, caption=f"Style preview: {style}", width=220)
     with st.expander("🎨 Saare caption styles dekho (gallery)"):
@@ -108,7 +116,7 @@ with st.container():
         for _i, _sn in enumerate(["default", "modern", "neon", "beast", "gold",
                                   "minimal", "hormozi", "boxed", "invert", "soft"]):
             with _g[_i % 2]:
-                _pp = f"previews/{_sn}.png"
+                _pp = os.path.join(PREVIEW_DIR, f"{_sn}.png")
                 if os.path.isfile(_pp):
                     st.image(_pp, caption=_sn, use_container_width=True)
     r1, r2 = st.columns(2)
@@ -143,8 +151,9 @@ with st.container():
                                value=False,
                                help="9:16 me speaker ka close-up upar, wide shot neeche, beech me caption bar.")
     with st.expander("👀 Double frame demo dekho"):
-        if os.path.isfile("previews/double_frame.png"):
-            st.image("previews/double_frame.png",
+        _dp = os.path.join(PREVIEW_DIR, "double_frame.png")
+        if os.path.isfile(_dp):
+            st.image(_dp,
                      caption="Double frame demo — upar close-up, beech me captions, neeche wide",
                      use_container_width=True)
         else:

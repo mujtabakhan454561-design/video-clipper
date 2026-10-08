@@ -776,6 +776,68 @@ def make_upload_title(h, seg_cues=None):
     return (title + " " + " ".join(tags)).strip()
 
 
+def _draw_double_frame_diagram(path):
+    """Double frame layout ka simple diagram (PIL se, koi video nahi chahiye)."""
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return False
+    W, H = 540, 960
+    img = Image.new("RGB", (W, H), (8, 12, 24))
+    dr = ImageDraw.Draw(img)
+    # upar: close-up (face)
+    dr.rectangle([0, 0, W, 500], fill=(96, 64, 52))
+    dr.ellipse([W // 2 - 95, 110, W // 2 + 95, 300], fill=(214, 172, 140))
+    dr.rectangle([W // 2 - 95, 300, W // 2 + 95, 380], fill=(60, 60, 64))
+    dr.text((20, 20), "CLOSE-UP", fill=(255, 255, 255))
+    # beech: caption bar
+    dr.rectangle([0, 500, W, 610], fill=(13, 27, 61))
+    dr.rectangle([90, 535, 450, 552], fill=(255, 255, 255))
+    dr.rectangle([170, 560, 370, 577], fill=(255, 235, 0))
+    dr.text((20, 520), "CAPTIONS", fill=(160, 180, 220))
+    # neeche: wide shot
+    dr.rectangle([0, 610, W, 960], fill=(36, 48, 66))
+    dr.rectangle([40, 700, 500, 880], fill=(52, 68, 90))
+    dr.ellipse([230, 730, 310, 810], fill=(214, 172, 140))
+    dr.text((20, 630), "WIDE SHOT", fill=(255, 255, 255))
+    img.save(path)
+    return True
+
+
+def ensure_previews():
+    """Caption style previews + double frame diagram app me hi banao (upload nahi chahiye)."""
+    import tempfile
+    d = os.path.join(tempfile.gettempdir(), "vc_previews")
+    try:
+        os.makedirs(d, exist_ok=True)
+    except Exception:
+        return d
+    try:
+        need = [s for s in STYLES if not os.path.isfile(os.path.join(d, f"{s}.png"))]
+        if need:
+            bg = os.path.join(d, "_bg.png")
+            if not os.path.isfile(bg):
+                run_cmd(["ffmpeg", "-y", "-v", "error", "-f", "lavfi",
+                         "-i", "color=c=0x1a1a2e:s=1080x1920:r=30:d=1",
+                         "-frames:v", "1", bg])
+            cues = [{"start": 0, "end": 5, "text": "ye moment sab se best hai"}]
+            for style in need:
+                ass = os.path.join(d, f"_{style}.ass")
+                write_ass(cues, ass, style=style, keywords=["best"], hl_on=True,
+                          ratio="9:16", anchor="bottom")
+                esc = ass.replace(":", "\\:").replace("'", "")
+                run_cmd(["ffmpeg", "-y", "-v", "error", "-i", bg, "-vf",
+                         f"subtitles='{esc}'", "-frames:v", "1",
+                         os.path.join(d, f"{style}.png")])
+                if os.path.isfile(ass):
+                    os.remove(ass)
+        if not os.path.isfile(os.path.join(d, "double_frame.png")):
+            _draw_double_frame_diagram(os.path.join(d, "double_frame.png"))
+    except Exception:
+        pass
+    return d
+
+
 def _broll_queries(seg_cues, keywords):
     """Clip ke liye 2 Pexels search queries: AI keywords, warna frequent words."""
     qs = [k.strip() for k in (keywords or []) if len(k.strip()) > 2][:2]
