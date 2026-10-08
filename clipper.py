@@ -714,8 +714,8 @@ def retime_cues(cues, kept):
 
 # ---------------- smart crop: face tracking ----------------
 
-def _sample_face_cxs(video: str, start: float, end: float):
-    """Clip ke frames me sab chehron ki cx list (0..1)."""
+def _sample_faces(video: str, start: float, end: float):
+    """Clip ke frames me faces: [(cx, cy, fh)] fractions me. cy=face center, fh=face height."""
     try:
         import cv2
     except ImportError:
@@ -724,7 +724,6 @@ def _sample_face_cxs(video: str, start: float, end: float):
         import tempfile
         d = tempfile.mkdtemp(prefix="faces_")
         dur = max(1, int(end - start))
-        # har 2 second par ek frame
         subprocess.run(
             ["ffmpeg", "-y", "-v", "error", "-ss", str(start), "-i", video,
              "-vf", f"fps={max(1, dur // 15)}", "-frames:v", "16",
@@ -732,7 +731,7 @@ def _sample_face_cxs(video: str, start: float, end: float):
             capture_output=True, timeout=120)
         clf = cv2.CascadeClassifier(
             cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-        cxs = []
+        out = []
         for fn in sorted(os.listdir(d)):
             img = cv2.imread(os.path.join(d, fn))
             if img is None:
@@ -742,12 +741,17 @@ def _sample_face_cxs(video: str, start: float, end: float):
             h, w = gray.shape
             for (x, y, fw, fh) in faces:
                 if fh > h * 0.08:  # bahut chhote false-positive ignore
-                    cxs.append((x + fw / 2) / w)
+                    out.append(((x + fw / 2) / w, (y + fh / 2) / h, fh / h))
         import shutil
         shutil.rmtree(d, ignore_errors=True)
-        return cxs
+        return out
     except Exception:
         return []
+
+
+def _sample_face_cxs(video: str, start: float, end: float):
+    """Clip ke frames me sab chehron ki cx list (0..1)."""
+    return [f[0] for f in _sample_faces(video, start, end)]
 
 
 def detect_face_cx(video: str, start: float, end: float):
@@ -760,28 +764,43 @@ def detect_face_cx(video: str, start: float, end: float):
     return cxs[len(cxs) // 2]  # median
 
 
-def detect_two_faces(video: str, start: float, end: float):
-    """Double frame ke liye (main_cx, second_cx|None). 1 face mile to bhi kaam karega."""
-    cxs = _sample_face_cxs(video, start, end)
-    if not cxs:
+def detect_face_box(video: str, start: float, end: float):
+    """Main face ka box (cx, cy, fh) fractions me, ya None."""
+    faces = _sample_faces(video, start, end)
+    if not faces:
+        return None
+    faces.sort(key=lambda f: f[0])
+    return faces[len(faces) // 2]
+
+
+def detect_two_face_boxes(video: str, start: float, end: float):
+    """Double frame ke liye (main_box, second_box|None). Box = (cx, cy, fh)."""
+    faces = _sample_faces(video, start, end)
+    if not faces:
         return (None, None)
-    cxs.sort()
-    cx1 = cxs[len(cxs) // 2]  # median = main speaker
-    if len(cxs) < 3:
-        return (cx1, None)
-    # dusra cluster dhoondo (duo style ke liye)
+    faces.sort(key=lambda f: f[0])
+    main = faces[len(faces) // 2]
+    if len(faces) < 3:
+        return (main, None)
+    cxs = [f[0] for f in faces]
     best_i, best_gap = 0, 0.0
     for i in range(1, len(cxs)):
         g = cxs[i] - cxs[i - 1]
         if g > best_gap:
             best_gap, best_i = g, i
     if best_gap < 0.15:
-        return (cx1, None)  # 1 speaker
-    g1, g2 = cxs[:best_i], cxs[best_i:]
+        return (main, None)  # 1 speaker
+    g1, g2 = faces[:best_i], faces[best_i:]
     if len(g1) < 2 or len(g2) < 2:
-        return (cx1, None)
+        return (main, None)
     small = g1 if len(g1) < len(g2) else g2
-    return (cx1, small[len(small) // 2])
+    return (main, small[len(small) // 2])
+
+
+def detect_two_faces(video: str, start: float, end: float):
+    """Double frame ke liye (main_cx, second_cx|None). 1 face mile to bhi kaam karega."""
+    b1, b2 = detect_two_face_boxes(video, start, end)
+    return ((b1[0] if b1 else None), (b2[0] if b2 else None))
 
 
 # double frame styles: naam -> (label)
@@ -1283,6 +1302,46 @@ def _cu_crop(cx):
     return (f"crop=iw*0.62:ih:x=clip(iw*{cx:.3f}-iw*0.31\\,0\\,iw*0.38):y=0")
 
 
+def _tight_crop(sw, sh, box, cx_fallback=0.5):
+    """Asal tight face close-up: chehre ke gird 2.3x chaudai, 2.9x unchai.
+    box=(cx, cy, fh) fractions me; None ho to head-and-shoulders fallback."""
+    if box is None:
+        cw, ch = int(sw * 0.50), int(sh * 0.58)
+        x = int(min(max(sw * cx_fallback - cw / 2, 0), sw - cw))
+        y = int(sh * 0.04)
+    else:
+        cx, cy, fh = box
+        cw = int(sh * fh * 0.75 * 2.3)
+        ch = int(sh * fh * 2.9)
+        cw = min(max(cw, 120), sw)
+        ch = min(max(ch, 120), sh)
+        x = int(min(max(sw * cx - cw / 2, 0), sw - cw))
+        y = int(min(max(sh * cy - ch * 0.40, 0), sh - ch))
+    return f"crop={cw}:{ch}:x={x}:y={y}"
+
+
+def _listener_crop(sw, sh, box):
+    """Neeche wale panel ke liye: dusra banda (sunne wala) — medium shot."""
+    cx, cy, fh = box
+    cw, ch = int(sw * 0.68), int(sh * 0.72)
+    x = int(min(max(sw * cx - cw / 2, 0), sw - cw))
+    y = int(min(max(sh * cy - ch * 0.45, 0), sh - ch))
+    return f"crop={cw}:{ch}:x={x}:y={y}"
+
+
+def _src_size(video):
+    """Source video ki (width, height)."""
+    try:
+        r = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0", video],
+            capture_output=True, text=True, timeout=30)
+        w, h = r.stdout.strip().split(",")[:2]
+        return int(w), int(h)
+    except Exception:
+        return 1920, 1080
+
+
 _WIDE_CROP = "crop=iw*0.96:ih*0.96:x=iw*0.02:y=ih*0.02"
 
 
@@ -1302,10 +1361,16 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
         expr = "+".join(f"between(t\\,{a}\\,{b})" for a, b in kept)
         af.insert(0, f"aselect='{expr}',asetpts=N/SR/TB")
     if df and ratio == "9:16":
-        # 6 double frame styles
+        # 6 double frame styles — upar ASAL tight face close-up, neeche wide
         style = df.get("style", "classic")
-        cx1 = df.get("cx1", 0.5)
-        cx2 = df.get("cx2")
+        box1 = df.get("box1")
+        box2 = df.get("box2")
+        cx1 = box1[0] if box1 else df.get("cx1", 0.5)
+        sw, sh = _src_size(video)
+        cu1 = _tight_crop(sw, sh, box1, cx1)
+        cu2 = _tight_crop(sw, sh, box2, box2[0] if box2 else 0.5) if box2 else None
+        # neeche wala panel: dusra banda (listener) ho to us par, warna wide
+        bot_panel = _listener_crop(sw, sh, box2) if box2 else _WIDE_CROP
         bar_dur = sum(b - a for a, b in kept) if kept else (end - start)
         hook_y = 90
         parts = []
@@ -1316,21 +1381,21 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
                "format=yuv420p[bar]")
         if style == "pip":
             parts += [
-                f"[a]{_cu_crop(cx1)},{_sc_wh(440, 440)}[ins]",
+                f"[a]{cu1},{_sc_wh(440, 440)}[ins]",
                 f"[b]{_sc_wh(1080, 1920)}[bg]",
                 "[bg][ins]overlay=x=W-w-40:y=170,format=yuv420p[v]",
             ]
         elif style == "clean":
             parts += [
-                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 960)}[top]",
-                f"[b]{_WIDE_CROP},{_sc_wh(1080, 960)}[bot]",
+                f"[a]{cu1},{_sc_wh(1080, 960)}[top]",
+                f"[b]{bot_panel},{_sc_wh(1080, 960)}[bot]",
                 "[top][bot]vstack=inputs=2[v]",
             ]
         elif style == "duo":
             parts.append(bar)
-            bot_src = _cu_crop(cx2) if cx2 is not None else _WIDE_CROP
+            bot_src = cu2 if cu2 else _WIDE_CROP
             parts += [
-                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 860)}[top]",
+                f"[a]{cu1},{_sc_wh(1080, 860)}[top]",
                 f"[b]{bot_src},{_sc_wh(1080, 860)}[bot]",
                 "[top][bar][bot]vstack=inputs=3[v]",
             ]
@@ -1338,22 +1403,22 @@ def cut_clip(video, ass_path, start, end, out_path, title="", emoji="",
             parts.append(bar)
             parts += [
                 f"[a]{_WIDE_CROP},{_sc_wh(1080, 700)}[top]",
-                f"[b]{_cu_crop(cx1)},{_sc_wh(1080, 1020)}[bot]",
+                f"[b]{cu1},{_sc_wh(1080, 1020)}[bot]",
                 "[top][bar][bot]vstack=inputs=3[v]",
             ]
         elif style == "bartop":
             parts.append(bar)
             hook_y = 240
             parts += [
-                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 1020)}[mid]",
-                f"[b]{_WIDE_CROP},{_sc_wh(1080, 700)}[bot]",
+                f"[a]{cu1},{_sc_wh(1080, 1020)}[mid]",
+                f"[b]{bot_panel},{_sc_wh(1080, 700)}[bot]",
                 "[bar][mid][bot]vstack=inputs=3[v]",
             ]
         else:  # classic
             parts.append(bar)
             parts += [
-                f"[a]{_cu_crop(cx1)},{_sc_wh(1080, 1020)}[top]",
-                f"[b]{_WIDE_CROP},{_sc_wh(1080, 700)}[bot]",
+                f"[a]{cu1},{_sc_wh(1080, 1020)}[top]",
+                f"[b]{bot_panel},{_sc_wh(1080, 700)}[bot]",
                 "[top][bar][bot]vstack=inputs=3[v]",
             ]
         if captions:
@@ -1536,11 +1601,13 @@ def run_job(job: Job, source_url=None, upload_path=None, api_key="",
             df = None
             if df_style != "off" and ratio == "9:16":
                 job.message = f"Clip {i+1}: double frame ({df_style}) bana raha hai..."
-                cx1, cx2 = detect_two_faces(video, s, e)
-                if cx1 is None:
+                b1, b2 = detect_two_face_boxes(video, s, e)
+                if b1 is None:
                     # face nahi mila to bhi style ZAROOR lagao — center crop se
-                    cx1 = face_cx if face_cx is not None else 0.5
-                df = {"style": df_style, "cx1": cx1, "cx2": cx2}
+                    cx_fb = face_cx if face_cx is not None else 0.5
+                    b1 = (cx_fb, 0.35, 0.22)
+                df = {"style": df_style, "box1": b1, "box2": b2,
+                      "cx1": b1[0]}
             if df and df["style"] in ("classic", "duo", "reverse", "bartop"):
                 anchor = {"classic": "middle", "duo": "duo",
                           "reverse": "reversebar", "bartop": "topbar"}[df["style"]]
