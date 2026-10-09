@@ -181,8 +181,24 @@ if go:
     upload_path = None
     if uploaded is not None:
         upload_path = os.path.join(workdir, "upload_" + uploaded.name)
+        # NOTE (imandari se): st.file_uploader ka browser->server upload %
+        # Streamlit ke native widget me nazar nahi aata — yeh % us ke BAAD
+        # file ko server par save karne ka hai, taake badi file par pata chale.
+        total = uploaded.size or 0
+        save_bar = st.progress(0, text="Video save ho rahi hai… 0%")
+        done = 0
         with open(upload_path, "wb") as f:
-            f.write(uploaded.getbuffer())
+            while True:
+                chunk = uploaded.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                done += len(chunk)
+                if total > 0:
+                    p = min(100, int(done * 100 / total))
+                    save_bar.progress(p, text=f"Video save ho rahi hai… {p}%")
+        save_bar.progress(100, text="Video save ho gayi ✓")
+        uploaded.seek(0)
 
     job = Job(job_id=uuid.uuid4().hex[:10], workdir=workdir)
     thread = threading.Thread(
